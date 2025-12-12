@@ -1,20 +1,21 @@
 services:
-  # EXAONE-3.5-32B Server (Transformers 기반, 한국어 특화)
+  # EXAONE-3.5-32B Server + MCP Host (Transformers 기반, 한국어 특화)
   llm:
     image: lmsysorg/sglang:latest
-    container_name: exaone-32b
+    container_name: exaone-32b-mcp
     runtime: nvidia
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - HF_TOKEN=${HF_TOKEN}
+      - TOUR_API_KEY=${TOUR_API_KEY}
     ports:
       - "30000:30000"
     volumes:
       - ~/.cache/huggingface:/root/.cache/huggingface
-      - ./llm_server.py:/app/server.py
+      - ./llm_server_mcp.py:/app/server.py
     working_dir: /app
     command: >
-      bash -c "pip install --no-cache-dir accelerate &&
+      bash -c "pip install --no-cache-dir accelerate httpx &&
       python server.py"
     deploy:
       resources:

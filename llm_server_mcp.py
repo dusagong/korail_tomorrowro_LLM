@@ -1,0 +1,475 @@
+"""
+EXAONE-3.5-32B Server with MCP Host functionality
+LLM이 MCP 도구를 선택하고 호출하는 기능 포함
+"""
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from fastapi import FastAPI
+from pydantic import BaseModel
+import uvicorn
+import torch
+import httpx
+import json
+import asyncio
+import os
+from typing import Optional
+
+app = FastAPI(title="EXAONE-3.5-32B Server + MCP Host")
+
+# ========== MCP Server 설정 ==========
+MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://localhost:8000")
+
+# ========== 모델 로딩 ==========
+print("Loading model...")
+model_id = "LGAI-EXAONE/EXAONE-3.5-32B-Instruct"
+
+print(f"CUDA available: {torch.cuda.is_available()}")
+if torch.cuda.is_available():
+    print(f"CUDA device: {torch.cuda.get_device_name(0)}")
+
+tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+
+model = AutoModelForCausalLM.from_pretrained(
+    model_id,
+    torch_dtype=torch.bfloat16,
+    trust_remote_code=True,
+    device_map="auto",
+    max_memory={0: "100GiB", "cpu": "50GiB"},
+    offload_buffers=True,
+)
+
+device = next(model.parameters()).device
+print(f"Model loaded! Device: {device}")
+
+# ========== MCP 도구 정의 (tour-mcp-server 기준) ==========
+MCP_TOOLS = [
+    {
+        "name": "get_area_codes",
+        "description": "지역코드/시군구코드 조회. area_code가 없으면 시도 목록, 있으면 해당 지역의 시군구 목록 반환",
+        "parameters": {"area_code": "optional string - 지역코드"}
+    },
+    {
+        "name": "search_by_area",
+        "description": "지역기반 관광정보 검색. 특정 지역의 관광지, 음식점, 숙박 등 조회",
+        "parameters": {
+            "area_code": "string - 지역코드 (1:서울, 6:부산, 32:강원, 39:제주)",
+            "sigungu_code": "optional string - 시군구코드",
+            "content_type_id": "optional string - 12:관광지, 14:문화시설, 15:축제, 32:숙박, 39:음식점",
+            "num_of_rows": "optional int - 결과 개수 (기본 20)"
+        }
+    },
+    {
+        "name": "search_by_keyword",
+        "description": "키워드로 관광정보 검색",
+        "parameters": {
+            "keyword": "string - 검색 키워드",
+            "area_code": "optional string - 지역코드",
+            "content_type_id": "optional string - 관광타입",
+            "num_of_rows": "optional int - 결과 개수"
+        }
+    },
+    {
+        "name": "search_by_location",
+        "description": "GPS 위치 기반 주변 관광정보 검색",
+        "parameters": {
+            "map_x": "float - 경도",
+            "map_y": "float - 위도",
+            "radius": "optional int - 반경(미터, 기본 5000)",
+            "content_type_id": "optional string - 관광타입"
+        }
+    },
+    {
+        "name": "search_festivals",
+        "description": "축제/행사 정보 검색",
+        "parameters": {
+            "event_start_date": "string - 시작일 (YYYYMMDD)",
+            "event_end_date": "optional string - 종료일",
+            "area_code": "optional string - 지역코드"
+        }
+    },
+    {
+        "name": "search_stays",
+        "description": "숙박 정보 검색",
+        "parameters": {
+            "area_code": "optional string - 지역코드",
+            "sigungu_code": "optional string - 시군구코드"
+        }
+    },
+    {
+        "name": "get_detail_common",
+        "description": "관광지 상세정보 조회 (주소, 이미지, 개요 등)",
+        "parameters": {
+            "content_id": "string - 콘텐츠 ID",
+            "content_type_id": "string - 관광타입 ID"
+        }
+    },
+    {
+        "name": "get_detail_intro",
+        "description": "관광지 소개정보 조회 (운영시간, 입장료 등)",
+        "parameters": {
+            "content_id": "string - 콘텐츠 ID",
+            "content_type_id": "string - 관광타입 ID"
+        }
+    },
+    {
+        "name": "get_detail_images",
+        "description": "관광지 이미지 목록 조회",
+        "parameters": {"content_id": "string - 콘텐츠 ID"}
+    }
+]
+
+# 지역코드 매핑
+AREA_CODES = {
+    "서울": "1", "인천": "2", "대전": "3", "대구": "4", "광주": "5",
+    "부산": "6", "울산": "7", "세종": "8", "경기": "31", "강원": "32",
+    "충북": "33", "충남": "34", "경북": "35", "경남": "36",
+    "전북": "37", "전남": "38", "제주": "39"
+}
+
+CONTENT_TYPES = {
+    "관광지": "12", "문화시설": "14", "축제": "15", "여행코스": "25",
+    "레포츠": "28", "숙박": "32", "쇼핑": "38", "음식점": "39", "카페": "39"
+}
+
+
+# ========== Request/Response 모델 ==========
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+class ChatRequest(BaseModel):
+    model: str = "LGAI-EXAONE/EXAONE-3.5-32B-Instruct"
+    messages: list[ChatMessage]
+    max_tokens: int = 512
+    temperature: float = 0.7
+
+class MCPQueryRequest(BaseModel):
+    query: str  # 자연어 쿼리: "강릉 바다 근처 맛집 추천해줘"
+    max_tokens: int = 1024
+    temperature: float = 0.3
+
+
+# ========== LLM 생성 함수 ==========
+def generate_response(messages: list[dict], max_tokens: int = 512, temperature: float = 0.7) -> str:
+    input_text = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True
+    )
+    inputs = tokenizer(input_text, return_tensors="pt").to(model.device)
+
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=max_tokens,
+            temperature=temperature,
+            do_sample=temperature > 0,
+            pad_token_id=tokenizer.eos_token_id,
+        )
+
+    return tokenizer.decode(
+        outputs[0][inputs.input_ids.shape[1]:],
+        skip_special_tokens=True
+    )
+
+
+# ========== MCP 도구 호출 ==========
+async def call_mcp_tool(tool_name: str, arguments: dict) -> dict:
+    """MCP 서버의 도구 호출"""
+    async with httpx.AsyncClient(timeout=30) as client:
+        try:
+            # SSE 방식의 MCP 서버 호출
+            response = await client.post(
+                f"{MCP_SERVER_URL}/call_tool",
+                json={"name": tool_name, "arguments": arguments}
+            )
+            return response.json()
+        except Exception as e:
+            return {"error": str(e)}
+
+
+async def call_mcp_tool_direct(tool_name: str, arguments: dict) -> dict:
+    """MCP 서버 직접 호출 (HTTP API)"""
+    # tour-mcp-server의 함수를 직접 HTTP로 호출
+    # FastMCP는 기본적으로 stdio지만, HTTP wrapper 추가 필요
+
+    # 임시: 직접 Tour API 호출
+    async with httpx.AsyncClient(timeout=30) as client:
+        base_url = "https://apis.data.go.kr/B551011/KorService2"
+        api_key = os.getenv("TOUR_API_KEY", "")
+
+        common_params = {
+            "serviceKey": api_key,
+            "MobileOS": "ETC",
+            "MobileApp": "TravelMCP",
+            "_type": "json",
+            "numOfRows": arguments.get("num_of_rows", 20)
+        }
+
+        endpoint_map = {
+            "get_area_codes": "areaCode2",
+            "search_by_area": "areaBasedList2",
+            "search_by_keyword": "searchKeyword2",
+            "search_by_location": "locationBasedList2",
+            "search_festivals": "searchFestival2",
+            "search_stays": "searchStay2",
+            "get_detail_common": "detailCommon2",
+            "get_detail_intro": "detailIntro2",
+            "get_detail_images": "detailImage2",
+        }
+
+        endpoint = endpoint_map.get(tool_name)
+        if not endpoint:
+            return {"error": f"Unknown tool: {tool_name}"}
+
+        params = {**common_params}
+
+        # 파라미터 매핑
+        if "area_code" in arguments:
+            params["areaCode"] = arguments["area_code"]
+        if "sigungu_code" in arguments:
+            params["sigunguCode"] = arguments["sigungu_code"]
+        if "content_type_id" in arguments:
+            params["contentTypeId"] = arguments["content_type_id"]
+        if "keyword" in arguments:
+            params["keyword"] = arguments["keyword"]
+        if "map_x" in arguments:
+            params["mapX"] = arguments["map_x"]
+        if "map_y" in arguments:
+            params["mapY"] = arguments["map_y"]
+        if "radius" in arguments:
+            params["radius"] = arguments["radius"]
+        if "event_start_date" in arguments:
+            params["eventStartDate"] = arguments["event_start_date"]
+        if "content_id" in arguments:
+            params["contentId"] = arguments["content_id"]
+            params["defaultYN"] = "Y"
+            params["firstImageYN"] = "Y"
+            params["addrinfoYN"] = "Y"
+            params["overviewYN"] = "Y"
+
+        try:
+            response = await client.get(f"{base_url}/{endpoint}", params=params)
+            data = response.json()
+
+            if data["response"]["header"]["resultCode"] != "0000":
+                return {"error": data["response"]["header"]["resultMsg"]}
+
+            items = data["response"]["body"].get("items", {})
+            if not items:
+                return {"items": [], "totalCount": 0}
+
+            item_list = items.get("item", [])
+            if isinstance(item_list, dict):
+                item_list = [item_list]
+
+            return {
+                "items": item_list[:20],  # 최대 20개
+                "totalCount": data["response"]["body"].get("totalCount", len(item_list))
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+
+# ========== LLM 기반 도구 선택 ==========
+def select_tools_with_llm(query: str) -> list[dict]:
+    """LLM을 사용해 쿼리에 맞는 도구와 파라미터 선택"""
+
+    tools_description = "\n".join([
+        f"- {t['name']}: {t['description']}" for t in MCP_TOOLS
+    ])
+
+    prompt = f"""당신은 여행 정보 검색을 위한 도구 선택 AI입니다.
+사용자의 질문을 분석하고, 적절한 도구와 파라미터를 JSON 형식으로 반환하세요.
+
+## 사용 가능한 도구:
+{tools_description}
+
+## 지역코드:
+서울=1, 인천=2, 대전=3, 대구=4, 광주=5, 부산=6, 울산=7, 세종=8
+경기=31, 강원=32, 충북=33, 충남=34, 경북=35, 경남=36, 전북=37, 전남=38, 제주=39
+
+## 콘텐츠타입:
+관광지=12, 문화시설=14, 축제=15, 여행코스=25, 레포츠=28, 숙박=32, 쇼핑=38, 음식점=39
+
+## 사용자 질문:
+{query}
+
+## 응답 형식 (JSON만 출력):
+{{"tools": [{{"name": "도구명", "arguments": {{"param": "value"}}}}]}}
+
+여러 도구가 필요하면 배열에 추가하세요. 반드시 유효한 JSON만 출력하세요."""
+
+    messages = [{"role": "user", "content": prompt}]
+    response = generate_response(messages, max_tokens=500, temperature=0.1)
+
+    # JSON 파싱
+    try:
+        # JSON 부분만 추출
+        json_start = response.find("{")
+        json_end = response.rfind("}") + 1
+        if json_start >= 0 and json_end > json_start:
+            json_str = response[json_start:json_end]
+            result = json.loads(json_str)
+            return result.get("tools", [])
+    except json.JSONDecodeError:
+        pass
+
+    # 파싱 실패시 기본값
+    return []
+
+
+def curate_results_with_llm(query: str, tool_results: list[dict]) -> dict:
+    """LLM을 사용해 검색 결과를 큐레이션"""
+
+    # 결과 요약
+    results_summary = []
+    for result in tool_results:
+        if "items" in result and result["items"]:
+            for item in result["items"][:10]:
+                results_summary.append({
+                    "title": item.get("title", ""),
+                    "addr": item.get("addr1", ""),
+                    "type": item.get("contenttypeid", ""),
+                    "image": item.get("firstimage", "")
+                })
+
+    if not results_summary:
+        return {
+            "course_title": "검색 결과 없음",
+            "spots": [],
+            "summary": "요청하신 조건에 맞는 장소를 찾지 못했습니다."
+        }
+
+    prompt = f"""당신은 여행 코스 큐레이터입니다.
+검색된 장소들을 바탕으로 사용자에게 최적의 여행 코스를 추천하세요.
+
+## 사용자 요청:
+{query}
+
+## 검색된 장소들:
+{json.dumps(results_summary, ensure_ascii=False, indent=2)}
+
+## 응답 형식 (JSON만 출력):
+{{
+  "course_title": "코스 제목",
+  "spots": [
+    {{
+      "name": "장소명",
+      "time": "방문 시간 (예: 오전 10시)",
+      "duration": "소요 시간 (예: 1시간)",
+      "reason": "추천 이유",
+      "tip": "방문 팁"
+    }}
+  ],
+  "overall_tip": "전체 여행 팁",
+  "summary": "코스 요약"
+}}
+
+5개 이내의 장소를 선정하고, 동선을 고려해 순서를 정하세요. 반드시 유효한 JSON만 출력하세요."""
+
+    messages = [{"role": "user", "content": prompt}]
+    response = generate_response(messages, max_tokens=1000, temperature=0.5)
+
+    # JSON 파싱
+    try:
+        json_start = response.find("{")
+        json_end = response.rfind("}") + 1
+        if json_start >= 0 and json_end > json_start:
+            json_str = response[json_start:json_end]
+            return json.loads(json_str)
+    except json.JSONDecodeError:
+        pass
+
+    # 파싱 실패시 기본 응답
+    return {
+        "course_title": "추천 코스",
+        "spots": [{"name": r["title"], "reason": "검색 결과"} for r in results_summary[:5]],
+        "summary": "검색 결과 기반 추천입니다."
+    }
+
+
+# ========== API 엔드포인트 ==========
+@app.get("/health")
+async def health():
+    return {"status": "ok", "mcp_enabled": True}
+
+@app.get("/v1/models")
+async def models():
+    return {
+        "object": "list",
+        "data": [{"id": "LGAI-EXAONE/EXAONE-3.5-32B-Instruct", "object": "model"}]
+    }
+
+@app.post("/v1/chat/completions")
+async def chat_completions(request: ChatRequest):
+    """기존 OpenAI 호환 엔드포인트"""
+    messages = [{"role": m.role, "content": m.content} for m in request.messages]
+    response_text = generate_response(messages, request.max_tokens, request.temperature)
+
+    return {
+        "id": "chatcmpl-1",
+        "object": "chat.completion",
+        "model": request.model,
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": response_text},
+            "finish_reason": "stop"
+        }]
+    }
+
+
+@app.post("/v1/mcp/query")
+async def mcp_query(request: MCPQueryRequest):
+    """
+    MCP Host 엔드포인트
+    자연어 쿼리 → LLM이 도구 선택 → 도구 실행 → 결과 큐레이션
+    """
+    query = request.query
+
+    # 1. LLM으로 도구 선택
+    print(f"[MCP] Query: {query}")
+    selected_tools = select_tools_with_llm(query)
+    print(f"[MCP] Selected tools: {selected_tools}")
+
+    if not selected_tools:
+        return {
+            "success": False,
+            "error": "적절한 도구를 찾지 못했습니다.",
+            "query": query
+        }
+
+    # 2. 선택된 도구들 실행
+    tool_results = []
+    for tool in selected_tools:
+        tool_name = tool.get("name")
+        arguments = tool.get("arguments", {})
+
+        print(f"[MCP] Calling tool: {tool_name} with {arguments}")
+        result = await call_mcp_tool_direct(tool_name, arguments)
+        tool_results.append({
+            "tool": tool_name,
+            "arguments": arguments,
+            "result": result
+        })
+        print(f"[MCP] Tool result: {len(result.get('items', []))} items")
+
+    # 3. 결과 큐레이션
+    curated = curate_results_with_llm(query, [r["result"] for r in tool_results])
+
+    return {
+        "success": True,
+        "query": query,
+        "selected_tools": selected_tools,
+        "curated_course": curated,
+        "raw_results": tool_results
+    }
+
+
+@app.get("/v1/mcp/tools")
+async def list_mcp_tools():
+    """사용 가능한 MCP 도구 목록"""
+    return {"tools": MCP_TOOLS}
+
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=30000)
