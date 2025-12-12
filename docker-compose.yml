@@ -1,0 +1,68 @@
+services:
+  # EXAONE-3.5-32B Server (Transformers 기반, 한국어 특화)
+  llm:
+    image: lmsysorg/sglang:latest
+    container_name: exaone-32b
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - HF_TOKEN=${HF_TOKEN}
+    ports:
+      - "30000:30000"
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+      - ./llm_server.py:/app/server.py
+    working_dir: /app
+    command: >
+      bash -c "pip install --no-cache-dir accelerate &&
+      python server.py"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  # Qdrant - Vector Database for RAG
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    environment:
+      - QDRANT__SERVICE__GRPC_PORT=6334
+    restart: unless-stopped
+
+  # BGE-M3 Embedding Server (다국어/한국어 지원) - ARM64 + GPU
+  embedding:
+    image: lmsysorg/sglang:latest
+    container_name: embedding-bge-m3
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - HF_TOKEN=${HF_TOKEN}
+    ports:
+      - "8080:8080"
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+      - ./embedding_server.py:/app/server.py
+    working_dir: /app
+    command: >
+      bash -c "pip install --no-cache-dir sentence-transformers fastapi uvicorn &&
+      python server.py"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+volumes:
+  qdrant_data:
