@@ -4,10 +4,13 @@ services:
     image: lmsysorg/sglang:latest
     container_name: exaone-32b-mcp
     runtime: nvidia
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - HF_TOKEN=${HF_TOKEN}
       - TOUR_API_KEY=${TOUR_API_KEY}
+      - MCP_SERVER_URL=http://host.docker.internal:8000
     ports:
       - "30000:30000"
     volumes:

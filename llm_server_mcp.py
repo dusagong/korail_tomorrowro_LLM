@@ -174,15 +174,18 @@ def generate_response(messages: list[dict], max_tokens: int = 512, temperature: 
 
 # ========== MCP 도구 호출 ==========
 async def call_mcp_tool(tool_name: str, arguments: dict) -> dict:
-    """MCP 서버의 도구 호출"""
+    """MCP 서버의 도구 호출 (HTTP API)"""
     async with httpx.AsyncClient(timeout=30) as client:
         try:
-            # SSE 방식의 MCP 서버 호출
             response = await client.post(
-                f"{MCP_SERVER_URL}/call_tool",
+                f"{MCP_SERVER_URL}/api/call_tool",
                 json={"name": tool_name, "arguments": arguments}
             )
-            return response.json()
+            result = response.json()
+            if result.get("success"):
+                return result.get("result", {})
+            else:
+                return {"error": result.get("error", "Unknown error")}
         except Exception as e:
             return {"error": str(e)}
 
@@ -445,7 +448,7 @@ async def mcp_query(request: MCPQueryRequest):
         arguments = tool.get("arguments", {})
 
         print(f"[MCP] Calling tool: {tool_name} with {arguments}")
-        result = await call_mcp_tool_direct(tool_name, arguments)
+        result = await call_mcp_tool(tool_name, arguments)
         tool_results.append({
             "tool": tool_name,
             "arguments": arguments,
