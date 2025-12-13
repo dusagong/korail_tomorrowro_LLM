@@ -278,7 +278,7 @@ def select_tools_with_llm(query: str) -> list[dict]:
     """LLM을 사용해 쿼리에 맞는 도구와 파라미터 선택"""
 
     tools_description = "\n".join([
-        f"- {t['name']}: {t['description']}" for t in MCP_TOOLS
+        f"- {t['name']}: {t['description']}\n  파라미터: {t['parameters']}" for t in MCP_TOOLS
     ])
 
     prompt = f"""당신은 여행 정보 검색을 위한 도구 선택 AI입니다.
@@ -287,20 +287,39 @@ def select_tools_with_llm(query: str) -> list[dict]:
 ## 사용 가능한 도구:
 {tools_description}
 
-## 지역코드:
+## 지역코드 (area_code):
 서울=1, 인천=2, 대전=3, 대구=4, 광주=5, 부산=6, 울산=7, 세종=8
 경기=31, 강원=32, 충북=33, 충남=34, 경북=35, 경남=36, 전북=37, 전남=38, 제주=39
 
-## 콘텐츠타입:
+## 콘텐츠타입 (content_type_id):
 관광지=12, 문화시설=14, 축제=15, 여행코스=25, 레포츠=28, 숙박=32, 쇼핑=38, 음식점=39
+
+## 예시:
+질문: "강릉 바다 근처 맛집 추천해줘"
+응답: {{"tools": [{{"name": "search_by_keyword", "arguments": {{"keyword": "강릉 맛집", "content_type_id": "39", "num_of_rows": 20}}}}]}}
+
+질문: "제주도 관광지 알려줘"
+응답: {{"tools": [{{"name": "search_by_area", "arguments": {{"area_code": "39", "content_type_id": "12", "num_of_rows": 20}}}}]}}
+
+질문: "부산 해운대 근처 숙박과 맛집"
+응답: {{"tools": [{{"name": "search_by_keyword", "arguments": {{"keyword": "해운대 숙박", "area_code": "6", "content_type_id": "32"}}}}, {{"name": "search_by_keyword", "arguments": {{"keyword": "해운대 맛집", "area_code": "6", "content_type_id": "39"}}}}]}}
+
+질문: "서울 근처 이번주 축제"
+응답: {{"tools": [{{"name": "search_festivals", "arguments": {{"event_start_date": "20251213", "area_code": "1"}}}}]}}
+
+## 중요:
+- 지역명이 있으면 반드시 area_code로 변환
+- 음식점/맛집/카페는 content_type_id=39
+- 숙박/호텔/펜션은 content_type_id=32
+- 관광지/명소는 content_type_id=12
+- 키워드 검색(search_by_keyword)이 가장 유연함
+- 여러 조건이 있으면 도구를 여러 개 사용
 
 ## 사용자 질문:
 {query}
 
-## 응답 형식 (JSON만 출력):
-{{"tools": [{{"name": "도구명", "arguments": {{"param": "value"}}}}]}}
-
-여러 도구가 필요하면 배열에 추가하세요. 반드시 유효한 JSON만 출력하세요."""
+## 응답 (JSON만 출력, 설명 없이):
+{{"tools": [...]}}"""
 
     messages = [{"role": "user", "content": prompt}]
     response = generate_response(messages, max_tokens=500, temperature=0.1)
@@ -349,26 +368,29 @@ def curate_results_with_llm(query: str, tool_results: list[dict]) -> dict:
 ## 사용자 요청:
 {query}
 
-## 검색된 장소들:
+## 검색된 장소들 (총 {len(results_summary)}개):
 {json.dumps(results_summary, ensure_ascii=False, indent=2)}
 
-## 응답 형식 (JSON만 출력):
+## 응답 형식 (JSON만 출력, 설명 없이):
 {{
   "course_title": "코스 제목",
   "spots": [
     {{
       "name": "장소명",
-      "time": "방문 시간 (예: 오전 10시)",
-      "duration": "소요 시간 (예: 1시간)",
-      "reason": "추천 이유",
-      "tip": "방문 팁"
+      "address": "주소",
+      "reason": "추천 이유 (한 문장)",
+      "tip": "방문 팁 (한 문장)"
     }}
   ],
-  "overall_tip": "전체 여행 팁",
-  "summary": "코스 요약"
+  "summary": "전체 코스 요약 (2-3 문장)"
 }}
 
-5개 이내의 장소를 선정하고, 동선을 고려해 순서를 정하세요. 반드시 유효한 JSON만 출력하세요."""
+## 규칙:
+- 5~8개 장소 선정 (검색 결과 중 베스트만)
+- 같은 지역/테마끼리 묶어서 순서 정리
+- 중복되거나 비슷한 장소는 제외
+- 주소(addr)가 있는 장소 우선 선택
+- 반드시 유효한 JSON만 출력"""
 
     messages = [{"role": "user", "content": prompt}]
     response = generate_response(messages, max_tokens=1000, temperature=0.5)
@@ -386,7 +408,7 @@ def curate_results_with_llm(query: str, tool_results: list[dict]) -> dict:
     # 파싱 실패시 기본 응답
     return {
         "course_title": "추천 코스",
-        "spots": [{"name": r["title"], "reason": "검색 결과"} for r in results_summary[:5]],
+        "spots": [{"name": r["title"], "address": r["addr"], "reason": "검색 결과"} for r in results_summary[:5]],
         "summary": "검색 결과 기반 추천입니다."
     }
 
