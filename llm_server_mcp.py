@@ -44,76 +44,76 @@ print(f"Model loaded! Device: {device}")
 MCP_TOOLS = [
     {
         "name": "get_area_codes",
-        "description": "지역코드/시군구코드 조회. area_code가 없으면 시도 목록, 있으면 해당 지역의 시군구 목록 반환",
-        "parameters": {"area_code": "optional string - 지역코드"}
+        "description": "지역코드/시군구코드 목록 조회",
+        "parameters": {"area_code": "선택 - 지역코드"}
     },
     {
         "name": "search_by_area",
         "description": "지역기반 관광정보 검색. 특정 지역의 관광지, 음식점, 숙박 등 조회",
         "parameters": {
-            "area_code": "string - 지역코드 (1:서울, 6:부산, 32:강원, 39:제주)",
-            "sigungu_code": "optional string - 시군구코드",
-            "content_type_id": "optional string - 12:관광지, 14:문화시설, 15:축제, 32:숙박, 39:음식점",
-            "num_of_rows": "optional int - 결과 개수 (기본 20)"
+            "area_code": "필수 - 지역코드",
+            "content_type_id": "선택 - 콘텐츠타입",
+            "sigungu_code": "선택 - 시군구코드",
+            "num_of_rows": "선택 - 결과개수"
         }
     },
     {
         "name": "search_by_keyword",
-        "description": "키워드로 관광정보 검색",
+        "description": "키워드로 관광정보 검색. 가장 유연한 검색 방법",
         "parameters": {
-            "keyword": "string - 검색 키워드",
-            "area_code": "optional string - 지역코드",
-            "content_type_id": "optional string - 관광타입",
-            "num_of_rows": "optional int - 결과 개수"
+            "keyword": "필수 - 검색키워드",
+            "area_code": "선택 - 지역코드",
+            "content_type_id": "선택 - 콘텐츠타입",
+            "num_of_rows": "선택 - 결과개수"
         }
     },
     {
         "name": "search_by_location",
         "description": "GPS 위치 기반 주변 관광정보 검색",
         "parameters": {
-            "map_x": "float - 경도",
-            "map_y": "float - 위도",
-            "radius": "optional int - 반경(미터, 기본 5000)",
-            "content_type_id": "optional string - 관광타입"
+            "map_x": "필수 - 경도",
+            "map_y": "필수 - 위도",
+            "radius": "선택 - 반경(미터)",
+            "content_type_id": "선택 - 콘텐츠타입"
         }
     },
     {
         "name": "search_festivals",
         "description": "축제/행사 정보 검색",
         "parameters": {
-            "event_start_date": "string - 시작일 (YYYYMMDD)",
-            "event_end_date": "optional string - 종료일",
-            "area_code": "optional string - 지역코드"
+            "event_start_date": "필수 - 시작일(YYYYMMDD)",
+            "event_end_date": "선택 - 종료일(YYYYMMDD)",
+            "area_code": "선택 - 지역코드"
         }
     },
     {
         "name": "search_stays",
         "description": "숙박 정보 검색",
         "parameters": {
-            "area_code": "optional string - 지역코드",
-            "sigungu_code": "optional string - 시군구코드"
+            "area_code": "선택 - 지역코드",
+            "sigungu_code": "선택 - 시군구코드"
         }
     },
     {
         "name": "get_detail_common",
         "description": "관광지 상세정보 조회 (주소, 이미지, 개요 등)",
         "parameters": {
-            "content_id": "string - 콘텐츠 ID",
-            "content_type_id": "string - 관광타입 ID"
+            "content_id": "필수 - 콘텐츠ID",
+            "content_type_id": "필수 - 콘텐츠타입"
         }
     },
     {
         "name": "get_detail_intro",
         "description": "관광지 소개정보 조회 (운영시간, 입장료 등)",
         "parameters": {
-            "content_id": "string - 콘텐츠 ID",
-            "content_type_id": "string - 관광타입 ID"
+            "content_id": "필수 - 콘텐츠ID",
+            "content_type_id": "필수 - 콘텐츠타입"
         }
     },
     {
         "name": "get_detail_images",
         "description": "관광지 이미지 목록 조회",
-        "parameters": {"content_id": "string - 콘텐츠 ID"}
+        "parameters": {"content_id": "필수 - 콘텐츠ID"}
     }
 ]
 
@@ -309,11 +309,13 @@ def select_tools_with_llm(query: str) -> list[dict]:
 
 ## 중요:
 - 지역명이 있으면 반드시 area_code로 변환
-- 음식점/맛집/카페는 content_type_id=39
-- 숙박/호텔/펜션은 content_type_id=32
-- 관광지/명소는 content_type_id=12
+- 음식점/맛집/카페는 content_type_id="39"
+- 숙박/호텔/펜션은 content_type_id="32"
+- 관광지/명소는 content_type_id="12"
+- optional 파라미터는 확실한 값이 있을 때만 포함, 없으면 생략
 - 키워드 검색(search_by_keyword)이 가장 유연함
 - 여러 조건이 있으면 도구를 여러 개 사용
+- 모든 값은 실제 데이터만 입력 (설명문 금지)
 
 ## 사용자 질문:
 {query}
