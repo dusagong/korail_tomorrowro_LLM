@@ -114,6 +114,31 @@ MCP_TOOLS = [
         "name": "get_detail_images",
         "description": "관광지 이미지 목록 조회",
         "parameters": {"content_id": "필수 - 콘텐츠ID"}
+    },
+    {
+        "name": "get_category_codes",
+        "description": "서비스 분류코드 조회",
+        "parameters": {
+            "content_type_id": "선택 - 콘텐츠타입",
+            "cat1": "선택 - 대분류",
+            "cat2": "선택 - 중분류"
+        }
+    },
+    {
+        "name": "get_detail_info",
+        "description": "소개정보 조회 (반복정보)",
+        "parameters": {
+            "content_id": "필수 - 콘텐츠ID",
+            "content_type_id": "필수 - 콘텐츠타입"
+        }
+    },
+    {
+        "name": "get_pet_tour_info",
+        "description": "반려동물 여행정보 조회",
+        "parameters": {
+            "area_code": "선택 - 지역코드",
+            "sigungu_code": "선택 - 시군구코드"
+        }
     }
 ]
 
