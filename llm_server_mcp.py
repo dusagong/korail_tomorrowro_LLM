@@ -333,11 +333,16 @@ def select_tools_with_llm(query: str, area_code: Optional[str] = None, sigungu_c
 ## 콘텐츠타입 (content_type_id):
 관광지=12, 문화시설=14, 축제=15, 여행코스=25, 레포츠=28, 숙박=32, 쇼핑=38, 음식점=39
 
-## 예시 (area_code가 제공된 경우):
-질문: "바다 근처 맛집이랑 카페 추천해줘"
-제공된 area_code: "32"
-응답: {{"tools": [{{"name": "search_by_keyword", "arguments": {{"keyword": "바다 맛집", "area_code": "32", "content_type_id": "39"}}}}]}}
+## 예시 (area_code + sigungu_code 제공된 경우):
+질문: "바다 근처 맛집 추천해줘"
+제공된 area_code: "32", sigungu_code: "1"
+응답: {{"tools": [{{"name": "search_by_keyword", "arguments": {{"keyword": "바다 맛집", "area_code": "32", "sigungu_code": "1", "content_type_id": "39"}}}}]}}
 
+질문: "맛집 추천해줘"
+제공된 area_code: "32", sigungu_code: "1"
+응답: {{"tools": [{{"name": "search_by_keyword", "arguments": {{"keyword": "맛집", "area_code": "32", "sigungu_code": "1", "content_type_id": "39"}}}}]}}
+
+## 예시 (area_code만 제공된 경우):
 질문: "조용한 관광지 추천"
 제공된 area_code: "39"
 응답: {{"tools": [{{"name": "search_by_keyword", "arguments": {{"keyword": "조용한 관광지", "area_code": "39", "content_type_id": "12"}}}}]}}
@@ -351,6 +356,7 @@ def select_tools_with_llm(query: str, area_code: Optional[str] = None, sigungu_c
 
 ## 중요:
 - **area_code가 위에 제공된 경우 반드시 그 값을 사용 (최우선)**
+- **sigungu_code가 제공된 경우 반드시 arguments에 포함 (최우선)**
 - 제공되지 않은 경우에만 질문에서 지역명을 추출하여 area_code로 변환
 - 음식점/맛집/카페는 content_type_id="39"
 - 숙박/호텔/펜션은 content_type_id="32"
