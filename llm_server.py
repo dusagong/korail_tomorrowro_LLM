@@ -20,7 +20,7 @@ tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
 # DIGITS unified memory - use device_map with max_memory hint
 model = AutoModelForCausalLM.from_pretrained(
     model_id,
-    torch_dtype=torch.bfloat16,
+    dtype=torch.bfloat16,
     trust_remote_code=True,
     device_map="auto",
     max_memory={0: "100GiB", "cpu": "50GiB"},

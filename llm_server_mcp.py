@@ -30,7 +30,7 @@ tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
 
 model = AutoModelForCausalLM.from_pretrained(
     model_id,
-    torch_dtype=torch.bfloat16,
+    dtype=torch.bfloat16,
     trust_remote_code=True,
     device_map="auto",
     max_memory={0: "100GiB", "cpu": "50GiB"},
@@ -169,6 +169,8 @@ class ChatRequest(BaseModel):
 
 class MCPQueryRequest(BaseModel):
     query: str  # 자연어 쿼리: "강릉 바다 근처 맛집 추천해줘"
+    area_code: Optional[str] = None  # 모바일에서 선택한 도 코드 (예: "32" for 강원)
+    sigungu_code: Optional[str] = None  # 모바일에서 선택한 시/군/구 코드
     max_tokens: int = 1024
     temperature: float = 0.3
 
@@ -299,41 +301,57 @@ async def call_mcp_tool_direct(tool_name: str, arguments: dict) -> dict:
 
 
 # ========== LLM 기반 도구 선택 ==========
-def select_tools_with_llm(query: str) -> list[dict]:
+def select_tools_with_llm(query: str, area_code: Optional[str] = None, sigungu_code: Optional[str] = None) -> list[dict]:
     """LLM을 사용해 쿼리에 맞는 도구와 파라미터 선택"""
 
     tools_description = "\n".join([
         f"- {t['name']}: {t['description']}\n  파라미터: {t['parameters']}" for t in MCP_TOOLS
     ])
 
+    # area_code가 제공된 경우 프롬프트에 명시적으로 주입
+    area_context = ""
+    if area_code:
+        area_context = f"""
+**🔴 중요: 사용자가 이미 지역을 선택했습니다 🔴**
+- area_code: "{area_code}" (이 코드를 반드시 사용하세요. 다른 지역코드를 사용하지 마세요)
+"""
+        if sigungu_code:
+            area_context += f'- sigungu_code: "{sigungu_code}" (이 코드를 반드시 사용하세요)\n'
+        area_context += "\n질문에서 지역명을 추출하지 말고, 위에 제공된 area_code를 그대로 사용하세요.\n"
+
     prompt = f"""당신은 여행 정보 검색을 위한 도구 선택 AI입니다.
 사용자의 질문을 분석하고, 적절한 도구와 파라미터를 JSON 형식으로 반환하세요.
 
+{area_context}
 ## 사용 가능한 도구:
 {tools_description}
 
-## 지역코드 (area_code):
+## 지역코드 (area_code) - 사용자가 제공하지 않은 경우에만 참고:
 서울=1, 인천=2, 대전=3, 대구=4, 광주=5, 부산=6, 울산=7, 세종=8
 경기=31, 강원=32, 충북=33, 충남=34, 경북=35, 경남=36, 전북=37, 전남=38, 제주=39
 
 ## 콘텐츠타입 (content_type_id):
 관광지=12, 문화시설=14, 축제=15, 여행코스=25, 레포츠=28, 숙박=32, 쇼핑=38, 음식점=39
 
-## 예시:
-질문: "강릉 바다 근처 맛집 추천해줘"
-응답: {{"tools": [{{"name": "search_by_keyword", "arguments": {{"keyword": "강릉 맛집", "content_type_id": "39", "num_of_rows": 20}}}}]}}
+## 예시 (area_code가 제공된 경우):
+질문: "바다 근처 맛집이랑 카페 추천해줘"
+제공된 area_code: "32"
+응답: {{"tools": [{{"name": "search_by_keyword", "arguments": {{"keyword": "바다 맛집", "area_code": "32", "content_type_id": "39"}}}}]}}
 
-질문: "제주도 관광지 알려줘"
-응답: {{"tools": [{{"name": "search_by_area", "arguments": {{"area_code": "39", "content_type_id": "12", "num_of_rows": 20}}}}]}}
+질문: "조용한 관광지 추천"
+제공된 area_code: "39"
+응답: {{"tools": [{{"name": "search_by_keyword", "arguments": {{"keyword": "조용한 관광지", "area_code": "39", "content_type_id": "12"}}}}]}}
+
+## 예시 (area_code가 제공되지 않은 경우):
+질문: "강릉 바다 근처 맛집 추천해줘"
+응답: {{"tools": [{{"name": "search_by_keyword", "arguments": {{"keyword": "강릉 맛집", "area_code": "32", "content_type_id": "39", "num_of_rows": 20}}}}]}}
 
 질문: "부산 해운대 근처 숙박과 맛집"
 응답: {{"tools": [{{"name": "search_by_keyword", "arguments": {{"keyword": "해운대 숙박", "area_code": "6", "content_type_id": "32"}}}}, {{"name": "search_by_keyword", "arguments": {{"keyword": "해운대 맛집", "area_code": "6", "content_type_id": "39"}}}}]}}
 
-질문: "서울 근처 이번주 축제"
-응답: {{"tools": [{{"name": "search_festivals", "arguments": {{"event_start_date": "20251213", "area_code": "1"}}}}]}}
-
 ## 중요:
-- 지역명이 있으면 반드시 area_code로 변환
+- **area_code가 위에 제공된 경우 반드시 그 값을 사용 (최우선)**
+- 제공되지 않은 경우에만 질문에서 지역명을 추출하여 area_code로 변환
 - 음식점/맛집/카페는 content_type_id="39"
 - 숙박/호텔/펜션은 content_type_id="32"
 - 관광지/명소는 content_type_id="12"
@@ -477,10 +495,12 @@ async def mcp_query(request: MCPQueryRequest):
     자연어 쿼리 → LLM이 도구 선택 → 도구 실행 → 결과 큐레이션
     """
     query = request.query
+    area_code = request.area_code
+    sigungu_code = request.sigungu_code
 
-    # 1. LLM으로 도구 선택
-    print(f"[MCP] Query: {query}")
-    selected_tools = select_tools_with_llm(query)
+    # 1. LLM으로 도구 선택 (area 정보 전달)
+    print(f"[MCP] Query: {query}, area_code: {area_code}, sigungu_code: {sigungu_code}")
+    selected_tools = select_tools_with_llm(query, area_code, sigungu_code)
     print(f"[MCP] Selected tools: {selected_tools}")
 
     if not selected_tools:
