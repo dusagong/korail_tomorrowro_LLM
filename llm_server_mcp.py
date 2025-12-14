@@ -383,14 +383,42 @@ def select_tools_with_llm(query: str, area_code: Optional[str] = None, sigungu_c
     print(f"[MCP DEBUG] LLM raw response:\n{response}")
     print(f"[MCP DEBUG] Response length: {len(response)}")
 
-    # JSON 파싱
+    # JSON 파싱 - 첫 번째 완전한 JSON 객체만 추출 (bracket counting)
     try:
-        # JSON 부분만 추출
         json_start = response.find("{")
-        json_end = response.rfind("}") + 1
+        if json_start < 0:
+            print(f"[MCP DEBUG] No JSON object found in response!")
+            return []
+
+        # Bracket counting으로 첫 번째 완전한 JSON 객체 찾기
+        bracket_count = 0
+        json_end = -1
+        in_string = False
+        escape_next = False
+
+        for i, char in enumerate(response[json_start:], start=json_start):
+            if escape_next:
+                escape_next = False
+                continue
+            if char == '\\' and in_string:
+                escape_next = True
+                continue
+            if char == '"' and not escape_next:
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if char == '{':
+                bracket_count += 1
+            elif char == '}':
+                bracket_count -= 1
+                if bracket_count == 0:
+                    json_end = i + 1
+                    break
+
         print(f"[MCP DEBUG] JSON range: {json_start} to {json_end}")
 
-        if json_start >= 0 and json_end > json_start:
+        if json_end > json_start:
             json_str = response[json_start:json_end]
             print(f"[MCP DEBUG] Extracted JSON:\n{json_str}")
             result = json.loads(json_str)
@@ -398,7 +426,7 @@ def select_tools_with_llm(query: str, area_code: Optional[str] = None, sigungu_c
             print(f"[MCP DEBUG] Parsed tools count: {len(tools)}")
             return tools
         else:
-            print(f"[MCP DEBUG] No valid JSON found in response!")
+            print(f"[MCP DEBUG] Could not find matching closing bracket!")
     except json.JSONDecodeError as e:
         print(f"[MCP DEBUG] JSON parsing error: {e}")
         print(f"[MCP DEBUG] Failed JSON string: {json_str if 'json_str' in locals() else 'N/A'}")
