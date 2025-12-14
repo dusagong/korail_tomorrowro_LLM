@@ -373,21 +373,38 @@ def select_tools_with_llm(query: str, area_code: Optional[str] = None, sigungu_c
 {{"tools": [...]}}"""
 
     messages = [{"role": "user", "content": prompt}]
+
+    print(f"[MCP DEBUG] Sending prompt to LLM for tool selection...")
+    print(f"[MCP DEBUG] area_code={area_code}, sigungu_code={sigungu_code}")
+
     response = generate_response(messages, max_tokens=500, temperature=0.1)
+
+    # 디버그: LLM의 raw response 출력
+    print(f"[MCP DEBUG] LLM raw response:\n{response}")
+    print(f"[MCP DEBUG] Response length: {len(response)}")
 
     # JSON 파싱
     try:
         # JSON 부분만 추출
         json_start = response.find("{")
         json_end = response.rfind("}") + 1
+        print(f"[MCP DEBUG] JSON range: {json_start} to {json_end}")
+
         if json_start >= 0 and json_end > json_start:
             json_str = response[json_start:json_end]
+            print(f"[MCP DEBUG] Extracted JSON:\n{json_str}")
             result = json.loads(json_str)
-            return result.get("tools", [])
-    except json.JSONDecodeError:
-        pass
+            tools = result.get("tools", [])
+            print(f"[MCP DEBUG] Parsed tools count: {len(tools)}")
+            return tools
+        else:
+            print(f"[MCP DEBUG] No valid JSON found in response!")
+    except json.JSONDecodeError as e:
+        print(f"[MCP DEBUG] JSON parsing error: {e}")
+        print(f"[MCP DEBUG] Failed JSON string: {json_str if 'json_str' in locals() else 'N/A'}")
 
     # 파싱 실패시 기본값
+    print(f"[MCP DEBUG] Returning empty tools list due to parsing failure")
     return []
 
 
