@@ -392,29 +392,37 @@ def select_tools_with_llm(query: str, area_code: Optional[str] = None, sigungu_c
 
 
 def curate_results_with_llm(query: str, tool_results: list[dict]) -> dict:
-    """LLM을 사용해 검색 결과를 큐레이션"""
+    """LLM을 사용해 검색 결과를 큐레이션 - spots(리스트뷰) + course(코스뷰) 분리"""
 
-    # 결과 요약
+    # 결과 요약 (좌표 정보 포함)
     results_summary = []
     for result in tool_results:
         if "items" in result and result["items"]:
-            for item in result["items"][:10]:
+            for item in result["items"][:15]:
                 results_summary.append({
                     "title": item.get("title", ""),
                     "addr": item.get("addr1", ""),
                     "type": item.get("contenttypeid", ""),
-                    "image": item.get("firstimage", "")
+                    "image": item.get("firstimage", ""),
+                    "mapx": item.get("mapx", ""),  # 경도
+                    "mapy": item.get("mapy", ""),  # 위도
+                    "tel": item.get("tel", ""),
+                    "content_id": item.get("contentid", "")
                 })
 
     if not results_summary:
         return {
-            "course_title": "검색 결과 없음",
             "spots": [],
-            "summary": "요청하신 조건에 맞는 장소를 찾지 못했습니다."
+            "course": None,
+            "message": "요청하신 조건에 맞는 장소를 찾지 못했습니다."
         }
 
-    prompt = f"""당신은 여행 코스 큐레이터입니다.
-검색된 장소들을 바탕으로 사용자에게 최적의 여행 코스를 추천하세요.
+    prompt = f"""당신은 코레일 동행열차 여행 큐레이터입니다.
+
+## 서비스 컨텍스트:
+- 대상: **커플 여행객** (코레일 동행열차 서비스)
+- 목적: 관광/데이트
+- 분위기: 로맨틱하고 특별한 추억 만들기
 
 ## 사용자 요청:
 {query}
@@ -424,44 +432,85 @@ def curate_results_with_llm(query: str, tool_results: list[dict]) -> dict:
 
 ## 응답 형식 (JSON만 출력, 설명 없이):
 {{
-  "course_title": "코스 제목",
-  "spots": [
-    {{
-      "name": "장소명",
-      "address": "주소",
-      "reason": "추천 이유 (한 문장)",
-      "tip": "방문 팁 (한 문장)"
-    }}
-  ],
-  "summary": "전체 코스 요약 (2-3 문장)"
+  "course": {{
+    "title": "코스 제목 (예: 강릉 바다향 데이트 코스)",
+    "stops": [
+      {{
+        "order": 1,
+        "name": "장소명",
+        "address": "주소",
+        "mapx": "경도값",
+        "mapy": "위도값",
+        "content_id": "콘텐츠ID",
+        "category": "카페/음식점/관광지/숙박",
+        "time": "오전 10시",
+        "duration": "1시간",
+        "reason": "커플에게 추천하는 이유",
+        "tip": "방문 팁"
+      }}
+    ],
+    "total_duration": "약 6시간",
+    "summary": "코스 요약 (2-3문장, 커플 여행 관점)"
+  }}
 }}
 
 ## 규칙:
-- 5~8개 장소 선정 (검색 결과 중 베스트만)
-- 같은 지역/테마끼리 묶어서 순서 정리
-- 중복되거나 비슷한 장소는 제외
-- 주소(addr)가 있는 장소 우선 선택
+- 사용자 요청에 맞게 3~6개 장소를 **동선 순서대로** 선정
+- **커플 데이트 관점**에서 추천 이유 작성
+- mapx, mapy 값이 있는 장소 우선 선택 (지도 연동용)
+- content_id 반드시 포함 (상세정보 조회용)
+- 중복/비슷한 장소 제외
 - 반드시 유효한 JSON만 출력"""
 
     messages = [{"role": "user", "content": prompt}]
-    response = generate_response(messages, max_tokens=1000, temperature=0.5)
+    response = generate_response(messages, max_tokens=1500, temperature=0.5)
 
     # JSON 파싱
+    curated_course = None
     try:
         json_start = response.find("{")
         json_end = response.rfind("}") + 1
         if json_start >= 0 and json_end > json_start:
             json_str = response[json_start:json_end]
-            return json.loads(json_str)
+            parsed = json.loads(json_str)
+            curated_course = parsed.get("course")
     except json.JSONDecodeError:
         pass
 
-    # 파싱 실패시 기본 응답
+    # spots 리스트 생성 (전체 검색 결과, 좌표 포함)
+    spots = []
+    for r in results_summary:
+        spots.append({
+            "name": r["title"],
+            "address": r["addr"],
+            "category": _get_category_name(r["type"]),
+            "image_url": r["image"],
+            "mapx": r["mapx"],
+            "mapy": r["mapy"],
+            "tel": r["tel"],
+            "content_id": r["content_id"]
+        })
+
     return {
-        "course_title": "추천 코스",
-        "spots": [{"name": r["title"], "address": r["addr"], "reason": "검색 결과"} for r in results_summary[:5]],
-        "summary": "검색 결과 기반 추천입니다."
+        "spots": spots,  # 리스트 뷰용 (전체)
+        "course": curated_course,  # 코스 뷰용 (LLM 큐레이션)
+        "message": f"{len(spots)}개의 장소를 찾았습니다."
     }
+
+
+def _get_category_name(content_type_id: str) -> str:
+    """content_type_id를 카테고리명으로 변환"""
+    type_map = {
+        "12": "관광지",
+        "14": "문화시설",
+        "15": "축제/행사",
+        "25": "여행코스",
+        "28": "레포츠",
+        "32": "숙박",
+        "38": "쇼핑",
+        "39": "음식점"
+    }
+    return type_map.get(content_type_id, "기타")
 
 
 # ========== API 엔드포인트 ==========
@@ -499,6 +548,10 @@ async def mcp_query(request: MCPQueryRequest):
     """
     MCP Host 엔드포인트
     자연어 쿼리 → LLM이 도구 선택 → 도구 실행 → 결과 큐레이션
+
+    응답 구조:
+    - spots: 리스트 뷰용 (전체 검색 결과, 좌표 포함)
+    - course: 코스 뷰용 (LLM이 큐레이션한 동선)
     """
     query = request.query
     area_code = request.area_code
@@ -513,7 +566,9 @@ async def mcp_query(request: MCPQueryRequest):
         return {
             "success": False,
             "error": "적절한 도구를 찾지 못했습니다.",
-            "query": query
+            "query": query,
+            "spots": [],
+            "course": None
         }
 
     # 2. 선택된 도구들 실행
@@ -531,15 +586,18 @@ async def mcp_query(request: MCPQueryRequest):
         })
         print(f"[MCP] Tool result: {len(result.get('items', []))} items")
 
-    # 3. 결과 큐레이션
+    # 3. 결과 큐레이션 (spots + course 분리)
     curated = curate_results_with_llm(query, [r["result"] for r in tool_results])
 
     return {
         "success": True,
         "query": query,
+        "area_code": area_code,
+        "sigungu_code": sigungu_code,
         "selected_tools": selected_tools,
-        "curated_course": curated,
-        "raw_results": tool_results
+        "spots": curated.get("spots", []),      # 리스트 뷰용
+        "course": curated.get("course"),         # 코스 뷰용
+        "message": curated.get("message", "")
     }
 
 
