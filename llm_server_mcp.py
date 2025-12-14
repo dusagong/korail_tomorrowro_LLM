@@ -11,6 +11,7 @@ import httpx
 import json
 import asyncio
 import os
+import re
 from typing import Optional
 
 app = FastAPI(title="EXAONE-3.5-32B Server + MCP Host")
@@ -421,7 +422,15 @@ def select_tools_with_llm(query: str, area_code: Optional[str] = None, sigungu_c
         if json_end > json_start:
             json_str = response[json_start:json_end]
             print(f"[MCP DEBUG] Extracted JSON:\n{json_str}")
-            result = json.loads(json_str)
+
+            # LLM이 JSON에 주석(//)을 포함시키는 경우가 있어서 제거
+            # 문자열 내부가 아닌 주석만 제거 (라인 끝까지)
+            json_str_clean = re.sub(r'//[^\n]*', '', json_str)
+            # 쉼표 뒤에 바로 }나 ]가 오는 경우 수정 (trailing comma)
+            json_str_clean = re.sub(r',(\s*[}\]])', r'\1', json_str_clean)
+            print(f"[MCP DEBUG] Cleaned JSON:\n{json_str_clean}")
+
+            result = json.loads(json_str_clean)
             tools = result.get("tools", [])
             print(f"[MCP DEBUG] Parsed tools count: {len(tools)}")
             return tools
