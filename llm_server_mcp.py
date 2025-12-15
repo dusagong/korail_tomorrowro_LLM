@@ -12,9 +12,58 @@ import json
 import asyncio
 import os
 import re
+import math
 from typing import Optional
 
 app = FastAPI(title="EXAONE-3.5-32B Server + MCP Host")
+
+
+def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """두 좌표 간 거리 계산 (km) - Haversine 공식"""
+    R = 6371  # 지구 반지름 (km)
+
+    lat1_rad = math.radians(lat1)
+    lat2_rad = math.radians(lat2)
+    delta_lat = math.radians(lat2 - lat1)
+    delta_lon = math.radians(lon2 - lon1)
+
+    a = math.sin(delta_lat / 2) ** 2 + \
+        math.cos(lat1_rad) * math.cos(lat2_rad) * math.sin(delta_lon / 2) ** 2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+    return R * c
+
+
+def calculate_nearby_places(places: list) -> list:
+    """각 장소에 대해 가까운 장소 정보 추가"""
+    for i, place in enumerate(places):
+        try:
+            lat1 = float(place.get("mapy", 0))
+            lon1 = float(place.get("mapx", 0))
+            if lat1 == 0 or lon1 == 0:
+                continue
+
+            nearby = []
+            for j, other in enumerate(places):
+                if i == j:
+                    continue
+                try:
+                    lat2 = float(other.get("mapy", 0))
+                    lon2 = float(other.get("mapx", 0))
+                    if lat2 == 0 or lon2 == 0:
+                        continue
+
+                    dist = haversine_distance(lat1, lon1, lat2, lon2)
+                    if dist < 5:  # 5km 이내
+                        nearby.append(f"{other.get('title')}({dist:.1f}km)")
+                except:
+                    continue
+
+            place["nearby"] = nearby[:3]  # 가까운 장소 최대 3개
+        except:
+            continue
+
+    return places
 
 # ========== MCP Server 설정 ==========
 MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://localhost:8000")
@@ -369,20 +418,23 @@ def analyze_query_needs(query: str) -> dict:
     needs = {}
 
     # 구체적인 음식 키워드 (API 키워드 검색에 직접 사용)
+    # 🔴 "일식", "고기" 등 카테고리 키워드도 추가 - 사용자가 원하는 정확한 검색 위해
     specific_food_keywords = [
+        # 메뉴 종류
         "돈까스", "돈가스", "삼겹살", "치킨", "피자", "파스타", "스테이크",
         "초밥", "회", "라멘", "우동", "냉면", "막국수", "칼국수", "짜장면", "짬뽕",
         "떡볶이", "순대", "김밥", "비빔밥", "불고기", "갈비", "삼계탕", "설렁탕",
         "순두부", "부대찌개", "감자탕", "곱창", "족발", "보쌈", "치즈", "버거", "햄버거",
-        "아이스크림", "빙수", "와플", "마카롱", "케이크"
+        "아이스크림", "빙수", "와플", "마카롱", "케이크",
+        # 음식 카테고리 (사용자가 "일식 먹고싶어" 등 요청시)
+        "일식", "중식", "한식", "양식", "고기", "횟집", "해산물", "분식"
     ]
     specific_matches = [kw for kw in specific_food_keywords if kw in query_lower]
     if specific_matches:
         needs["food_specific"] = specific_matches  # 직접 검색용
 
-    # 음식 관련 일반 키워드
-    food_keywords = ["맛집", "음식", "밥", "식당", "먹", "점심", "저녁", "아침",
-                     "한식", "중식", "일식", "양식", "분식", "고기", "해산물"]
+    # 음식 관련 일반 키워드 (구체적 키워드는 위에서 처리)
+    food_keywords = ["맛집", "음식", "밥", "식당", "먹", "점심", "저녁", "아침"]
     food_matches = [kw for kw in food_keywords if kw in query_lower]
     if food_matches or specific_matches:
         needs["food"] = food_matches + specific_matches
@@ -393,9 +445,9 @@ def analyze_query_needs(query: str) -> dict:
     if cafe_matches:
         needs["cafe"] = cafe_matches
 
-    # 관광지 관련 키워드
-    spot_keywords = ["관광", "명소", "볼거리", "구경", "바다", "산", "공원", "해변", "전망", "야경",
-                     "사진", "인스타", "데이트", "드라이브", "자연", "풍경", "경치"]
+    # 관광지 관련 키워드 (바닷가, 해안 등 추가)
+    spot_keywords = ["관광", "명소", "볼거리", "구경", "바다", "바닷가", "해안", "산", "공원", "해변",
+                     "전망", "야경", "사진", "인스타", "데이트", "드라이브", "자연", "풍경", "경치", "산책"]
     spot_matches = [kw for kw in spot_keywords if kw in query_lower]
     if spot_matches:
         needs["spot"] = spot_matches
@@ -727,6 +779,10 @@ def curate_results_with_llm(query: str, tool_results: list[dict]) -> dict:
             "message": "요청하신 조건에 맞는 장소를 찾지 못했습니다."
         }
 
+    # 🔴 거리 계산하여 nearby 정보 추가 (동선 최적화용)
+    results_summary = calculate_nearby_places(results_summary)
+    print(f"[CURATE] Added nearby info to {len(results_summary)} places")
+
     prompt = f"""당신은 코레일 동행열차 여행 큐레이터입니다.
 
 ## 서비스 컨텍스트:
@@ -738,6 +794,7 @@ def curate_results_with_llm(query: str, tool_results: list[dict]) -> dict:
 {query}
 
 ## 검색된 장소들 (총 {len(results_summary)}개):
+**nearby 필드는 해당 장소에서 5km 이내 가까운 장소들입니다. 동선 구성에 활용하세요!**
 {json.dumps(results_summary, ensure_ascii=False, indent=2)}
 
 ## 응답 형식 (JSON만 출력, 설명 없이):
@@ -765,7 +822,11 @@ def curate_results_with_llm(query: str, tool_results: list[dict]) -> dict:
 }}
 
 ## 규칙:
-- 사용자 요청에 맞게 3~6개 장소를 **동선 순서대로** 선정
+- **사용자가 요청한 순서대로** 코스를 구성하세요!
+  - 예: "카페 → 점심 일식 → 저녁 고기" 요청 시 → 카페 먼저, 일식집, 고기집 순서로!
+- 3~6개 장소를 **사용자 요청 순서 + 동선 고려**하여 선정
+- **nearby 필드를 활용**해서 가까운 장소끼리 묶어서 동선 최적화!
+  - 예: A장소의 nearby에 B장소가 있으면 A→B 순서가 이동 효율적
 - **커플 데이트 관점**에서 추천 이유 작성
 - mapx, mapy 값이 있는 장소 우선 선택 (지도 연동용)
 - content_id 반드시 포함 (상세정보 조회용)
@@ -773,9 +834,10 @@ def curate_results_with_llm(query: str, tool_results: list[dict]) -> dict:
 - 반드시 유효한 JSON만 출력
 
 ## 🔴🔴🔴 절대 규칙 - 반드시 준수:
-1. **검색된 장소 목록에 있는 장소만 선택하세요!**
-2. **새로운 장소를 임의로 만들지 마세요!** (예: "해변 산책", "카페 방문" 등 임의 추가 금지)
-3. **content_id가 없으면 그 장소는 사용할 수 없습니다**
+1. **사용자가 원하는 순서대로 코스 구성!** (카페→일식→고기 요청시 순서 지키기)
+2. **검색된 장소 목록에 있는 장소만 선택하세요!**
+3. **새로운 장소를 임의로 만들지 마세요!** (예: "해변 산책", "카페 방문" 등 임의 추가 금지)
+4. **content_id가 없으면 그 장소는 사용할 수 없습니다**
 
 ## 🔴 매우 중요 - 정확한 정보 사용:
 - **category 필드를 그대로 사용하세요** (추측하지 마세요!)
