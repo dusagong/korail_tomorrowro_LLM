@@ -957,28 +957,52 @@ def select_tools_with_llm(query: str, area_code: Optional[str] = None, sigungu_c
 def curate_results_with_llm(query: str, tool_results: list[dict]) -> dict:
     """LLM을 사용해 검색 결과를 큐레이션 - spots(리스트뷰) + course(코스뷰) 분리"""
 
-    # 결과 요약 (좌표 정보 + 한글 카테고리 포함)
-    results_summary = []
+    # 🔴 카테고리별로 분류해서 균형있게 선택
+    items_by_category = {
+        "12": [],  # 관광지
+        "14": [],  # 문화시설
+        "32": [],  # 숙박
+        "39": [],  # 음식점/카페
+    }
+
     for result in tool_results:
         if "items" in result and result["items"]:
-            for item in result["items"][:15]:
-                content_type = item.get("contenttypeid", "")
-                cat3 = item.get("cat3", "")
-                # 한글 카테고리명으로 변환 (LLM이 정확하게 이해하도록)
-                category_name = _get_category_name(content_type, cat3)
+            for item in result["items"]:
+                content_type = item.get("contenttypeid", "39")
+                if content_type in items_by_category:
+                    items_by_category[content_type].append(item)
+                else:
+                    items_by_category["39"].append(item)  # 기본값: 음식점
 
-                results_summary.append({
-                    "title": item.get("title", ""),
-                    "addr": item.get("addr1", ""),
-                    "type": content_type,
-                    "cat3": cat3,
-                    "category": category_name,  # 한글 카테고리명 추가!
-                    "image": item.get("firstimage", ""),
-                    "mapx": item.get("mapx", ""),  # 경도
-                    "mapy": item.get("mapy", ""),  # 위도
-                    "tel": item.get("tel", ""),
-                    "content_id": item.get("contentid", "")
-                })
+    # 카테고리별 통계 출력
+    for cat, items in items_by_category.items():
+        if items:
+            print(f"[CURATE] Category {cat}: {len(items)} items")
+
+    # 🔴 카테고리별로 균형있게 선택 (각 카테고리에서 최대 8개씩)
+    MAX_PER_CATEGORY = 8
+    results_summary = []
+
+    for content_type, items in items_by_category.items():
+        for item in items[:MAX_PER_CATEGORY]:
+            cat3 = item.get("cat3", "")
+            # 한글 카테고리명으로 변환 (LLM이 정확하게 이해하도록)
+            category_name = _get_category_name(content_type, cat3)
+
+            results_summary.append({
+                "title": item.get("title", ""),
+                "addr": item.get("addr1", ""),
+                "type": content_type,
+                "cat3": cat3,
+                "category": category_name,  # 한글 카테고리명 추가!
+                "image": item.get("firstimage", ""),
+                "mapx": item.get("mapx", ""),  # 경도
+                "mapy": item.get("mapy", ""),  # 위도
+                "tel": item.get("tel", ""),
+                "content_id": item.get("contentid", "")
+            })
+
+    print(f"[CURATE] Total balanced results: {len(results_summary)} places")
 
     if not results_summary:
         return {
@@ -999,13 +1023,53 @@ def curate_results_with_llm(query: str, tool_results: list[dict]) -> dict:
     results_summary = calculate_nearby_places(results_summary)
     print(f"[CURATE] Added nearby info to {len(results_summary)} places")
 
+    # 🔴 사용자 요청에서 카테고리 순서 추출
+    user_categories = []
+    query_lower = query.lower()
+
+    # 순서대로 매칭 (쿼리에서 등장하는 순서대로)
+    category_keywords = [
+        ("카페", ["카페", "커피"]),
+        ("관광지", ["바다", "바닷가", "해변", "관광", "구경", "산책"]),
+        ("치킨", ["치킨", "통닭"]),
+        ("횟집", ["횟집", "회", "해산물"]),
+        ("고깃집", ["고기", "고깃집", "삼겹살", "갈비"]),
+        ("일식", ["일식", "초밥", "라멘"]),
+        ("한식", ["한식", "한정식"]),
+    ]
+
+    # 쿼리에서 각 카테고리의 첫 등장 위치 찾기
+    category_positions = []
+    for cat_name, keywords in category_keywords:
+        for kw in keywords:
+            pos = query_lower.find(kw)
+            if pos >= 0:
+                category_positions.append((pos, cat_name))
+                break
+
+    # 등장 순서대로 정렬
+    category_positions.sort(key=lambda x: x[0])
+    user_categories = [cat for _, cat in category_positions]
+
+    user_order_text = ""
+    if user_categories:
+        user_order_text = f"""
+## 🔴🔴🔴 사용자가 요청한 순서 (이 순서대로 코스 구성 필수!):
+{' → '.join(user_categories)}
+
+**위 순서를 반드시 지켜서 코스를 구성하세요!**
+- 각 카테고리에서 최소 1개 이상 선택
+- category 필드를 확인해서 올바른 장소 선택
+"""
+        print(f"[CURATE] User requested order: {' → '.join(user_categories)}")
+
     prompt = f"""당신은 코레일 동행열차 여행 큐레이터입니다.
 
 ## 서비스 컨텍스트:
 - 대상: **커플 여행객** (코레일 동행열차 서비스)
 - 목적: 관광/데이트
 - 분위기: 로맨틱하고 특별한 추억 만들기
-
+{user_order_text}
 ## 사용자 요청:
 {query}
 
