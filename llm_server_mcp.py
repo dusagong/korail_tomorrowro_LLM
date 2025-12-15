@@ -680,16 +680,22 @@ def select_tools_with_llm(query: str, area_code: Optional[str] = None, sigungu_c
 def curate_results_with_llm(query: str, tool_results: list[dict]) -> dict:
     """LLM을 사용해 검색 결과를 큐레이션 - spots(리스트뷰) + course(코스뷰) 분리"""
 
-    # 결과 요약 (좌표 정보 + cat3 포함)
+    # 결과 요약 (좌표 정보 + 한글 카테고리 포함)
     results_summary = []
     for result in tool_results:
         if "items" in result and result["items"]:
             for item in result["items"][:15]:
+                content_type = item.get("contenttypeid", "")
+                cat3 = item.get("cat3", "")
+                # 한글 카테고리명으로 변환 (LLM이 정확하게 이해하도록)
+                category_name = _get_category_name(content_type, cat3)
+
                 results_summary.append({
                     "title": item.get("title", ""),
                     "addr": item.get("addr1", ""),
-                    "type": item.get("contenttypeid", ""),
-                    "cat3": item.get("cat3", ""),  # 세부 카테고리 (카페 구분용)
+                    "type": content_type,
+                    "cat3": cat3,
+                    "category": category_name,  # 한글 카테고리명 추가!
                     "image": item.get("firstimage", ""),
                     "mapx": item.get("mapx", ""),  # 경도
                     "mapy": item.get("mapy", ""),  # 위도
@@ -747,7 +753,16 @@ def curate_results_with_llm(query: str, tool_results: list[dict]) -> dict:
 - mapx, mapy 값이 있는 장소 우선 선택 (지도 연동용)
 - content_id 반드시 포함 (상세정보 조회용)
 - 중복/비슷한 장소 제외
-- 반드시 유효한 JSON만 출력"""
+- 반드시 유효한 JSON만 출력
+
+## 🔴 매우 중요 - 정확한 정보 사용:
+- **category 필드를 그대로 사용하세요** (추측하지 마세요!)
+  - "한식" → 한식 음식점
+  - "일식" → 일식 음식점 (초밥, 라멘 등)
+  - "서양식" → 서양 음식점 (돈까스, 파스타, 스테이크 등)
+  - "카페" → 카페/디저트
+- 장소 이름만 보고 음식 종류를 **추측하지 마세요**
+- 예: "황태전파는집"은 category가 "한식"이면 황태 전문 한식당입니다 (고깃집 아님!)"""
 
     messages = [{"role": "user", "content": prompt}]
     response = generate_response(messages, max_tokens=1500, temperature=0.5)
@@ -830,17 +845,31 @@ def _get_category_name(content_type_id: str, cat3: str = None) -> str:
     """content_type_id + cat3를 카테고리명으로 변환
 
     cat3 코드 (음식점 세부 분류):
-    - A05020900: 카페/전통찻집
     - A05020100: 한식
-    - A05020200: 서양식 (돈까스, 파스타 등)
-    - A05020300: 일식
+    - A05020200: 서양식 (돈까스, 파스타, 스테이크 등)
+    - A05020300: 일식 (초밥, 라멘 등)
     - A05020400: 중식
+    - A05020500: 아시아음식
+    - A05020600: 패밀리레스토랑
     - A05020700: 이색음식점
+    - A05020800: 패스트푸드
+    - A05020900: 카페/전통찻집
     """
-    # 음식점(39)인 경우 cat3로 카페 구분
+    # 음식점(39)인 경우 cat3로 세부 분류
     if content_type_id == "39" and cat3:
-        if cat3 == "A05020900":
-            return "카페"
+        cat3_map = {
+            "A05020100": "한식",
+            "A05020200": "서양식",
+            "A05020300": "일식",
+            "A05020400": "중식",
+            "A05020500": "아시아음식",
+            "A05020600": "패밀리레스토랑",
+            "A05020700": "이색음식점",
+            "A05020800": "패스트푸드",
+            "A05020900": "카페",
+        }
+        if cat3 in cat3_map:
+            return cat3_map[cat3]
 
     type_map = {
         "12": "관광지",
