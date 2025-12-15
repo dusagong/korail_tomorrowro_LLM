@@ -156,6 +156,20 @@ CONTENT_TYPES = {
     "레포츠": "28", "숙박": "32", "쇼핑": "38", "음식점": "39", "카페": "39"
 }
 
+# Need 타입 → Content Type 매핑
+NEED_TO_CONTENT_TYPE = {
+    "food": "39",      # 음식점
+    "cafe": "39",      # 카페 (음식점과 동일)
+    "spot": "12",      # 관광지
+    "stay": "32",      # 숙박
+    "culture": "14",   # 문화시설
+    "shopping": "38",  # 쇼핑
+    "festival": "15",  # 축제
+}
+
+# 최소 결과 개수 기준
+MIN_RESULTS_THRESHOLD = 3
+
 
 # ========== Request/Response 모델 ==========
 class ChatMessage(BaseModel):
@@ -299,6 +313,161 @@ async def call_mcp_tool_direct(tool_name: str, arguments: dict) -> dict:
             }
         except Exception as e:
             return {"error": str(e)}
+
+
+# ========== 오케스트레이션 헬퍼 함수 ==========
+async def search_by_keyword_direct(keyword: str, area_code: str, sigungu_code: str, content_type_id: str = None, num_rows: int = 20) -> dict:
+    """키워드 검색 직접 호출"""
+    args = {
+        "keyword": keyword,
+        "area_code": area_code,
+        "num_of_rows": num_rows
+    }
+    if sigungu_code:
+        args["sigungu_code"] = sigungu_code
+    if content_type_id:
+        args["content_type_id"] = content_type_id
+
+    return await call_mcp_tool_direct("search_by_keyword", args)
+
+
+async def search_by_area_direct(area_code: str, sigungu_code: str, content_type_id: str = None, num_rows: int = 20) -> dict:
+    """지역 기반 검색 직접 호출"""
+    args = {
+        "area_code": area_code,
+        "num_of_rows": num_rows
+    }
+    if sigungu_code:
+        args["sigungu_code"] = sigungu_code
+    if content_type_id:
+        args["content_type_id"] = content_type_id
+
+    return await call_mcp_tool_direct("search_by_area", args)
+
+
+def analyze_query_needs(query: str) -> dict:
+    """쿼리에서 필요한 것들을 분석 (LLM 없이 규칙 기반)"""
+    query_lower = query.lower()
+    needs = {}
+
+    # 음식 관련 키워드
+    food_keywords = ["맛집", "음식", "밥", "식당", "먹", "점심", "저녁", "아침", "돈까스", "삼겹살",
+                     "치킨", "피자", "한식", "중식", "일식", "양식", "분식", "고기", "해산물", "회"]
+    food_matches = [kw for kw in food_keywords if kw in query_lower]
+    if food_matches:
+        needs["food"] = food_matches
+
+    # 카페 관련 키워드
+    cafe_keywords = ["카페", "커피", "디저트", "빵", "베이커리", "브런치", "차", "음료"]
+    cafe_matches = [kw for kw in cafe_keywords if kw in query_lower]
+    if cafe_matches:
+        needs["cafe"] = cafe_matches
+
+    # 관광지 관련 키워드
+    spot_keywords = ["관광", "명소", "볼거리", "구경", "바다", "산", "공원", "해변", "전망", "야경",
+                     "사진", "인스타", "데이트", "드라이브", "자연", "풍경", "경치"]
+    spot_matches = [kw for kw in spot_keywords if kw in query_lower]
+    if spot_matches:
+        needs["spot"] = spot_matches
+
+    # 숙박 관련 키워드
+    stay_keywords = ["숙소", "호텔", "펜션", "모텔", "숙박", "잠", "묵", "리조트", "게스트하우스"]
+    stay_matches = [kw for kw in stay_keywords if kw in query_lower]
+    if stay_matches:
+        needs["stay"] = stay_matches
+
+    # 문화시설 관련 키워드
+    culture_keywords = ["박물관", "미술관", "전시", "공연", "영화", "문화", "역사"]
+    culture_matches = [kw for kw in culture_keywords if kw in query_lower]
+    if culture_matches:
+        needs["culture"] = culture_matches
+
+    # 아무것도 매칭 안되면 기본적으로 관광지 + 음식점
+    if not needs:
+        needs["spot"] = ["관광"]
+        needs["food"] = ["맛집"]
+
+    print(f"[ORCH] Analyzed needs: {needs}")
+    return needs
+
+
+async def orchestrated_search(query: str, area_code: str, sigungu_code: str, needs: dict) -> dict:
+    """
+    오케스트레이션된 검색 - 폴백 전략 포함
+
+    전략:
+    1. 키워드 검색 시도 (매칭된 키워드로)
+    2. 결과 부족시 → 카테고리 기반 검색
+    3. 여전히 부족시 → 지역 전체 검색
+    """
+    all_results = {}
+    search_log = []
+
+    for need_type, keywords in needs.items():
+        content_type = NEED_TO_CONTENT_TYPE.get(need_type)
+        results_for_need = {"items": []}
+
+        # Strategy 1: 키워드 검색 (매칭된 키워드 중 하나로)
+        if keywords and isinstance(keywords, list):
+            for kw in keywords[:2]:  # 최대 2개 키워드 시도
+                print(f"[ORCH] Strategy 1: keyword search '{kw}' for {need_type}")
+                result = await search_by_keyword_direct(kw, area_code, sigungu_code, content_type)
+                items = result.get("items", [])
+                search_log.append(f"keyword:{kw}→{len(items)}개")
+
+                if len(items) >= MIN_RESULTS_THRESHOLD:
+                    results_for_need = result
+                    break
+                elif items:
+                    # 부분 결과라도 저장
+                    results_for_need["items"].extend(items)
+
+        # Strategy 2: 카테고리 기반 검색 (결과 부족시)
+        if len(results_for_need.get("items", [])) < MIN_RESULTS_THRESHOLD:
+            print(f"[ORCH] Strategy 2: area search with content_type={content_type}")
+            result = await search_by_area_direct(area_code, sigungu_code, content_type)
+            items = result.get("items", [])
+            search_log.append(f"area+type:{content_type}→{len(items)}개")
+
+            if items:
+                # 기존 결과에 추가 (중복 제거)
+                existing_ids = {i.get("contentid") for i in results_for_need.get("items", [])}
+                for item in items:
+                    if item.get("contentid") not in existing_ids:
+                        results_for_need["items"].append(item)
+
+        # Strategy 3: 지역 전체 검색 (여전히 부족시)
+        if len(results_for_need.get("items", [])) < MIN_RESULTS_THRESHOLD:
+            print(f"[ORCH] Strategy 3: area search without content_type")
+            result = await search_by_area_direct(area_code, sigungu_code, None, num_rows=30)
+            items = result.get("items", [])
+            search_log.append(f"area_only→{len(items)}개")
+
+            if items:
+                existing_ids = {i.get("contentid") for i in results_for_need.get("items", [])}
+                for item in items:
+                    if item.get("contentid") not in existing_ids:
+                        results_for_need["items"].append(item)
+
+        all_results[need_type] = results_for_need
+        print(f"[ORCH] {need_type}: {len(results_for_need.get('items', []))} items collected")
+
+    # 결과 합치기
+    combined_items = []
+    seen_ids = set()
+    for need_type, result in all_results.items():
+        for item in result.get("items", []):
+            cid = item.get("contentid")
+            if cid and cid not in seen_ids:
+                seen_ids.add(cid)
+                combined_items.append(item)
+
+    return {
+        "items": combined_items,
+        "totalCount": len(combined_items),
+        "search_log": search_log,
+        "needs_analyzed": list(needs.keys())
+    }
 
 
 # ========== LLM 기반 도구 선택 ==========
@@ -600,8 +769,8 @@ async def chat_completions(request: ChatRequest):
 @app.post("/v1/mcp/query")
 async def mcp_query(request: MCPQueryRequest):
     """
-    MCP Host 엔드포인트
-    자연어 쿼리 → LLM이 도구 선택 → 도구 실행 → 결과 큐레이션
+    MCP Host 엔드포인트 (오케스트레이션 버전)
+    자연어 쿼리 → 쿼리 분석 → 폴백 전략 검색 → 결과 큐레이션
 
     응답 구조:
     - spots: 리스트 뷰용 (전체 검색 결과, 좌표 포함)
@@ -611,47 +780,76 @@ async def mcp_query(request: MCPQueryRequest):
     area_code = request.area_code
     sigungu_code = request.sigungu_code
 
-    # 1. LLM으로 도구 선택 (area 정보 전달)
-    print(f"[MCP] Query: {query}, area_code: {area_code}, sigungu_code: {sigungu_code}")
-    selected_tools = select_tools_with_llm(query, area_code, sigungu_code)
-    print(f"[MCP] Selected tools: {selected_tools}")
+    print(f"[MCP-ORCH] Query: {query}, area_code: {area_code}, sigungu_code: {sigungu_code}")
 
-    if not selected_tools:
+    # area_code가 없으면 기존 LLM 기반 방식 사용
+    if not area_code:
+        print("[MCP-ORCH] No area_code, falling back to LLM-based tool selection")
+        selected_tools = select_tools_with_llm(query, area_code, sigungu_code)
+
+        if not selected_tools:
+            return {
+                "success": False,
+                "error": "적절한 도구를 찾지 못했습니다.",
+                "query": query,
+                "spots": [],
+                "course": None
+            }
+
+        tool_results = []
+        for tool in selected_tools:
+            result = await call_mcp_tool(tool.get("name"), tool.get("arguments", {}))
+            tool_results.append({"result": result})
+
+        curated = curate_results_with_llm(query, [r["result"] for r in tool_results])
         return {
-            "success": False,
-            "error": "적절한 도구를 찾지 못했습니다.",
+            "success": True,
             "query": query,
-            "spots": [],
-            "course": None
+            "spots": curated.get("spots", []),
+            "course": curated.get("course"),
+            "message": curated.get("message", ""),
+            "search_mode": "llm_based"
         }
 
-    # 2. 선택된 도구들 실행
-    tool_results = []
-    for tool in selected_tools:
-        tool_name = tool.get("name")
-        arguments = tool.get("arguments", {})
+    # ========== 오케스트레이션 모드 ==========
+    print("[MCP-ORCH] Using orchestrated search with fallback strategies")
 
-        print(f"[MCP] Calling tool: {tool_name} with {arguments}")
-        result = await call_mcp_tool(tool_name, arguments)
-        tool_results.append({
-            "tool": tool_name,
-            "arguments": arguments,
-            "result": result
-        })
-        print(f"[MCP] Tool result: {len(result.get('items', []))} items")
+    # Phase 1: 쿼리 분석 (규칙 기반 - 빠름)
+    needs = analyze_query_needs(query)
+    print(f"[MCP-ORCH] Needs: {needs}")
 
-    # 3. 결과 큐레이션 (spots + course 분리)
-    curated = curate_results_with_llm(query, [r["result"] for r in tool_results])
+    # Phase 2: 오케스트레이션 검색 (폴백 전략 포함)
+    search_result = await orchestrated_search(query, area_code, sigungu_code, needs)
+    print(f"[MCP-ORCH] Search result: {search_result.get('totalCount')} items")
+    print(f"[MCP-ORCH] Search log: {search_result.get('search_log')}")
+
+    # Phase 3: 결과 검증 - 최소 기준 미달시 추가 검색
+    if search_result.get("totalCount", 0) < MIN_RESULTS_THRESHOLD:
+        print("[MCP-ORCH] Results below threshold, doing broad search")
+        # 최후의 수단: 지역 전체 검색
+        broad_result = await search_by_area_direct(area_code, sigungu_code, None, num_rows=50)
+        if broad_result.get("items"):
+            existing_ids = {i.get("contentid") for i in search_result.get("items", [])}
+            for item in broad_result["items"]:
+                if item.get("contentid") not in existing_ids:
+                    search_result["items"].append(item)
+            search_result["totalCount"] = len(search_result["items"])
+            search_result["search_log"].append(f"broad_fallback→{len(broad_result['items'])}개")
+
+    # Phase 4: LLM 큐레이션 (코스 생성)
+    curated = curate_results_with_llm(query, [search_result])
 
     return {
         "success": True,
         "query": query,
         "area_code": area_code,
         "sigungu_code": sigungu_code,
-        "selected_tools": selected_tools,
-        "spots": curated.get("spots", []),      # 리스트 뷰용
-        "course": curated.get("course"),         # 코스 뷰용
-        "message": curated.get("message", "")
+        "spots": curated.get("spots", []),
+        "course": curated.get("course"),
+        "message": curated.get("message", ""),
+        "search_mode": "orchestrated",
+        "search_log": search_result.get("search_log", []),
+        "needs_analyzed": search_result.get("needs_analyzed", [])
     }
 
 
