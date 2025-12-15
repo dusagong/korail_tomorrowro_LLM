@@ -688,17 +688,58 @@ def curate_results_with_llm(query: str, tool_results: list[dict]) -> dict:
     messages = [{"role": "user", "content": prompt}]
     response = generate_response(messages, max_tokens=1500, temperature=0.5)
 
-    # JSON 파싱
+    print(f"[CURATE DEBUG] LLM response length: {len(response)}")
+    print(f"[CURATE DEBUG] LLM response preview: {response[:500]}...")
+
+    # JSON 파싱 - bracket counting 방식 (select_tools_with_llm과 동일)
     curated_course = None
     try:
         json_start = response.find("{")
-        json_end = response.rfind("}") + 1
-        if json_start >= 0 and json_end > json_start:
-            json_str = response[json_start:json_end]
-            parsed = json.loads(json_str)
-            curated_course = parsed.get("course")
-    except json.JSONDecodeError:
-        pass
+        if json_start < 0:
+            print("[CURATE DEBUG] No JSON object found in response!")
+        else:
+            # Bracket counting으로 첫 번째 완전한 JSON 객체 찾기
+            bracket_count = 0
+            json_end = -1
+            in_string = False
+            escape_next = False
+
+            for i, char in enumerate(response[json_start:], start=json_start):
+                if escape_next:
+                    escape_next = False
+                    continue
+                if char == '\\' and in_string:
+                    escape_next = True
+                    continue
+                if char == '"' and not escape_next:
+                    in_string = not in_string
+                    continue
+                if in_string:
+                    continue
+                if char == '{':
+                    bracket_count += 1
+                elif char == '}':
+                    bracket_count -= 1
+                    if bracket_count == 0:
+                        json_end = i + 1
+                        break
+
+            print(f"[CURATE DEBUG] JSON range: {json_start} to {json_end}")
+
+            if json_end > json_start:
+                json_str = response[json_start:json_end]
+                # 주석 제거 및 trailing comma 수정
+                json_str_clean = re.sub(r'//[^\n]*', '', json_str)
+                json_str_clean = re.sub(r',(\s*[}\]])', r'\1', json_str_clean)
+
+                parsed = json.loads(json_str_clean)
+                curated_course = parsed.get("course")
+                print(f"[CURATE DEBUG] Successfully parsed course: {curated_course is not None}")
+            else:
+                print("[CURATE DEBUG] Could not find matching closing bracket!")
+    except json.JSONDecodeError as e:
+        print(f"[CURATE DEBUG] JSON parsing error: {e}")
+        print(f"[CURATE DEBUG] Failed JSON string: {json_str[:500] if 'json_str' in locals() else 'N/A'}...")
 
     # spots 리스트 생성 (전체 검색 결과, 좌표 포함)
     spots = []
