@@ -958,18 +958,25 @@ def curate_results_with_llm(query: str, tool_results: list[dict]) -> dict:
     """LLM을 사용해 검색 결과를 큐레이션 - spots(리스트뷰) + course(코스뷰) 분리"""
 
     # 🔴 카테고리별로 분류해서 균형있게 선택
+    # 카페(cat3=A05020900)는 음식점과 별도로 분리!
     items_by_category = {
-        "12": [],  # 관광지
-        "14": [],  # 문화시설
-        "32": [],  # 숙박
-        "39": [],  # 음식점/카페
+        "12": [],      # 관광지
+        "14": [],      # 문화시설
+        "32": [],      # 숙박
+        "39": [],      # 음식점 (카페 제외)
+        "cafe": [],    # 카페 (별도 분리)
     }
 
     for result in tool_results:
         if "items" in result and result["items"]:
             for item in result["items"]:
                 content_type = item.get("contenttypeid", "39")
-                if content_type in items_by_category:
+                cat3 = item.get("cat3", "")
+
+                # 🔴 카페(A05020900)는 별도 카테고리로 분리
+                if content_type == "39" and cat3 == "A05020900":
+                    items_by_category["cafe"].append(item)
+                elif content_type in items_by_category:
                     items_by_category[content_type].append(item)
                 else:
                     items_by_category["39"].append(item)  # 기본값: 음식점
@@ -977,7 +984,8 @@ def curate_results_with_llm(query: str, tool_results: list[dict]) -> dict:
     # 카테고리별 통계 출력
     for cat, items in items_by_category.items():
         if items:
-            print(f"[CURATE] Category {cat}: {len(items)} items")
+            cat_name = {"12": "관광지", "14": "문화시설", "32": "숙박", "39": "음식점", "cafe": "카페"}.get(cat, cat)
+            print(f"[CURATE] Category {cat_name}: {len(items)} items")
 
     # 🔴 카테고리별로 균형있게 선택 (각 카테고리에서 최대 8개씩)
     MAX_PER_CATEGORY = 8
@@ -1029,13 +1037,16 @@ def curate_results_with_llm(query: str, tool_results: list[dict]) -> dict:
 
     # 순서대로 매칭 (쿼리에서 등장하는 순서대로)
     category_keywords = [
-        ("카페", ["카페", "커피"]),
-        ("관광지", ["바다", "바닷가", "해변", "관광", "구경", "산책"]),
+        ("카페", ["카페", "커피", "디저트"]),
+        ("관광지", ["바다", "바닷가", "해변", "관광", "구경", "산책", "공원"]),
         ("치킨", ["치킨", "통닭"]),
-        ("횟집", ["횟집", "회", "해산물"]),
-        ("고깃집", ["고기", "고깃집", "삼겹살", "갈비"]),
-        ("일식", ["일식", "초밥", "라멘"]),
-        ("한식", ["한식", "한정식"]),
+        ("횟집", ["횟집", "회", "해산물", "생선"]),
+        ("고깃집", ["고기", "고깃집", "삼겹살", "갈비", "소고기", "돼지"]),
+        ("돈까스", ["돈까스", "돈가스", "까스"]),
+        ("일식", ["일식", "초밥", "라멘", "스시"]),
+        ("한식", ["한식", "한정식", "백반"]),
+        ("중식", ["중식", "중국", "짜장", "짬뽕"]),
+        ("양식", ["양식", "파스타", "스테이크", "피자"]),
     ]
 
     # 쿼리에서 각 카테고리의 첫 등장 위치 찾기
