@@ -2,6 +2,11 @@
 EXAONE-3.5-32B Server with MCP Host functionality
 LLM이 MCP 도구를 선택하고 호출하는 기능 포함
 """
+import logging
+import sys
+import time
+from datetime import datetime
+
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -14,6 +19,30 @@ import os
 import re
 import math
 from typing import Optional
+
+# ========== 로깅 설정 ==========
+LOG_FORMAT = "%(asctime)s | %(levelname)-8s | %(name)-12s | %(message)s"
+LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format=LOG_FORMAT,
+    datefmt=LOG_DATE_FORMAT,
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+
+# 로거 생성
+logger = logging.getLogger("LLM_MCP")
+logger.setLevel(logging.DEBUG)
+
+# 외부 라이브러리 로그 레벨 조절
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("transformers").setLevel(logging.WARNING)
+
+logger.info("=" * 70)
+logger.info(f"LLM MCP 서버 시작: {datetime.now().isoformat()}")
+logger.info("=" * 70)
 
 app = FastAPI(title="EXAONE-3.5-32B Server + MCP Host")
 
@@ -1508,18 +1537,28 @@ async def mcp_query(request: MCPQueryRequest):
     - spots: 리스트 뷰용 (전체 검색 결과, 좌표 포함)
     - course: 코스 뷰용 (LLM이 큐레이션한 동선)
     """
+    request_id = f"mcp_{int(time.time() * 1000)}"
+    start_time = time.time()
+
     query = request.query
     area_code = request.area_code
     sigungu_code = request.sigungu_code
 
-    print(f"[MCP-ORCH] Query: {query}, area_code: {area_code}, sigungu_code: {sigungu_code}")
+    logger.info("=" * 70)
+    logger.info(f"[{request_id}] /v1/mcp/query 요청 시작")
+    logger.info(f"[{request_id}] 시간: {datetime.now().isoformat()}")
+    logger.info(f"[{request_id}] 쿼리: {query}")
+    logger.info(f"[{request_id}] area_code: {area_code}, sigungu_code: {sigungu_code}")
+    logger.info("=" * 70)
 
     # area_code가 없으면 기존 LLM 기반 방식 사용
     if not area_code:
-        print("[MCP-ORCH] No area_code, falling back to LLM-based tool selection")
+        logger.info(f"[{request_id}] area_code 없음 → LLM 기반 도구 선택 모드")
         selected_tools = select_tools_with_llm(query, area_code, sigungu_code)
 
         if not selected_tools:
+            elapsed = time.time() - start_time
+            logger.warning(f"[{request_id}] 도구 선택 실패 (소요시간: {elapsed:.2f}초)")
             return {
                 "success": False,
                 "error": "적절한 도구를 찾지 못했습니다.",
@@ -1530,10 +1569,13 @@ async def mcp_query(request: MCPQueryRequest):
 
         tool_results = []
         for tool in selected_tools:
+            logger.debug(f"[{request_id}] MCP 도구 호출: {tool.get('name')}")
             result = await call_mcp_tool(tool.get("name"), tool.get("arguments", {}))
             tool_results.append({"result": result})
 
         curated = curate_results_with_llm(query, [r["result"] for r in tool_results])
+        elapsed = time.time() - start_time
+        logger.info(f"[{request_id}] LLM 기반 모드 완료 (소요시간: {elapsed:.2f}초)")
         return {
             "success": True,
             "query": query,
@@ -1544,33 +1586,67 @@ async def mcp_query(request: MCPQueryRequest):
         }
 
     # ========== 오케스트레이션 모드 ==========
-    print("[MCP-ORCH] Using orchestrated search with fallback strategies")
+    logger.info(f"[{request_id}] 오케스트레이션 모드 시작")
 
     # Phase 1: 쿼리 분석 (규칙 기반 - 빠름)
+    phase1_start = time.time()
     needs = analyze_query_needs(query)
-    print(f"[MCP-ORCH] Needs: {needs}")
+    phase1_elapsed = time.time() - phase1_start
+    logger.info(f"[{request_id}] [Phase 1] 쿼리 분석 완료 (소요시간: {phase1_elapsed:.3f}초)")
+    logger.info(f"[{request_id}]   - needs: {list(needs.keys())}")
+    if "user_order" in needs:
+        logger.info(f"[{request_id}]   - user_order: {[cat for cat, _ in needs['user_order']]}")
 
     # Phase 2: 오케스트레이션 검색 (폴백 전략 포함)
+    phase2_start = time.time()
     search_result = await orchestrated_search(query, area_code, sigungu_code, needs)
-    print(f"[MCP-ORCH] Search result: {search_result.get('totalCount')} items")
-    print(f"[MCP-ORCH] Search log: {search_result.get('search_log')}")
+    phase2_elapsed = time.time() - phase2_start
+    logger.info(f"[{request_id}] [Phase 2] 검색 완료 (소요시간: {phase2_elapsed:.2f}초)")
+    logger.info(f"[{request_id}]   - 검색 결과: {search_result.get('totalCount')} items")
+    logger.info(f"[{request_id}]   - 검색 로그: {search_result.get('search_log')}")
 
     # Phase 3: 결과 검증 - 최소 기준 미달시 추가 검색
     if search_result.get("totalCount", 0) < MIN_RESULTS_THRESHOLD:
-        print("[MCP-ORCH] Results below threshold, doing broad search")
-        # 최후의 수단: 지역 전체 검색
+        logger.warning(f"[{request_id}] [Phase 3] 결과 부족 ({search_result.get('totalCount')} < {MIN_RESULTS_THRESHOLD}), 광역 검색 수행")
+        phase3_start = time.time()
         broad_result = await search_by_area_direct(area_code, sigungu_code, None, num_rows=50)
         if broad_result.get("items"):
             existing_ids = {i.get("contentid") for i in search_result.get("items", [])}
+            added_count = 0
             for item in broad_result["items"]:
                 if item.get("contentid") not in existing_ids:
                     search_result["items"].append(item)
+                    added_count += 1
             search_result["totalCount"] = len(search_result["items"])
             search_result["search_log"].append(f"broad_fallback→{len(broad_result['items'])}개")
+            logger.info(f"[{request_id}]   - 광역 검색으로 {added_count}개 추가")
+        phase3_elapsed = time.time() - phase3_start
+        logger.info(f"[{request_id}] [Phase 3] 광역 검색 완료 (소요시간: {phase3_elapsed:.2f}초)")
 
     # Phase 4: LLM 큐레이션 (코스 생성) - user_order 전달
+    phase4_start = time.time()
     user_order = search_result.get("user_order", [])
+    logger.info(f"[{request_id}] [Phase 4] LLM 큐레이션 시작 (입력 items: {len(search_result.get('items', []))}개)")
     curated = curate_results_with_llm(query, [search_result], user_order=user_order)
+    phase4_elapsed = time.time() - phase4_start
+    logger.info(f"[{request_id}] [Phase 4] LLM 큐레이션 완료 (소요시간: {phase4_elapsed:.2f}초)")
+    logger.info(f"[{request_id}]   - spots: {len(curated.get('spots', []))}개")
+    logger.info(f"[{request_id}]   - course: {'있음' if curated.get('course') else '없음'}")
+    if curated.get("course"):
+        course = curated["course"]
+        logger.info(f"[{request_id}]   - course.title: {course.get('title')}")
+        logger.info(f"[{request_id}]   - course.stops: {len(course.get('stops', []))}개")
+        logger.info(f"[{request_id}]   - course.total_distance_km: {course.get('total_distance_km')}")
+
+    # 최종 응답
+    total_elapsed = time.time() - start_time
+    logger.info("=" * 70)
+    logger.info(f"[{request_id}] /v1/mcp/query 요청 완료")
+    logger.info(f"[{request_id}] 총 소요시간: {total_elapsed:.2f}초")
+    logger.info(f"[{request_id}]   - Phase 1 (분석): {phase1_elapsed:.3f}초")
+    logger.info(f"[{request_id}]   - Phase 2 (검색): {phase2_elapsed:.2f}초")
+    logger.info(f"[{request_id}]   - Phase 4 (큐레이션): {phase4_elapsed:.2f}초")
+    logger.info("=" * 70)
 
     return {
         "success": True,
