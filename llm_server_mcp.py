@@ -65,6 +65,117 @@ def calculate_nearby_places(places: list) -> list:
 
     return places
 
+
+def filter_by_geographic_cluster(places: list, max_radius_km: float = 10.0) -> list:
+    """
+    지리적 클러스터링을 통해 너무 멀리 떨어진 장소 필터링
+
+    전략:
+    1. 좌표가 있는 장소들의 중심점 계산
+    2. 중심점에서 max_radius_km 이내의 장소만 선택
+    3. 좌표 없는 장소는 유지 (제외하면 결과가 너무 적을 수 있음)
+    """
+    # 좌표가 있는 장소들 분리
+    places_with_coords = []
+    places_without_coords = []
+
+    for place in places:
+        try:
+            lat = float(place.get("mapy", 0))
+            lon = float(place.get("mapx", 0))
+            if lat != 0 and lon != 0:
+                places_with_coords.append((place, lat, lon))
+            else:
+                places_without_coords.append(place)
+        except:
+            places_without_coords.append(place)
+
+    if len(places_with_coords) < 2:
+        print(f"[CLUSTER] Not enough coords ({len(places_with_coords)}), returning all {len(places)} places")
+        return places
+
+    # 중심점 계산 (단순 평균)
+    avg_lat = sum(p[1] for p in places_with_coords) / len(places_with_coords)
+    avg_lon = sum(p[2] for p in places_with_coords) / len(places_with_coords)
+    print(f"[CLUSTER] Center point: ({avg_lat:.6f}, {avg_lon:.6f})")
+
+    # 중심점에서 가까운 장소만 선택
+    filtered_with_coords = []
+    excluded = []
+    for place, lat, lon in places_with_coords:
+        dist = haversine_distance(avg_lat, avg_lon, lat, lon)
+        if dist <= max_radius_km:
+            filtered_with_coords.append(place)
+        else:
+            excluded.append(f"{place.get('title', 'Unknown')}({dist:.1f}km)")
+
+    if excluded:
+        print(f"[CLUSTER] Excluded {len(excluded)} places beyond {max_radius_km}km: {excluded[:5]}")
+
+    # 결과 합치기 (좌표 있는 것 + 좌표 없는 것)
+    result = filtered_with_coords + places_without_coords
+    print(f"[CLUSTER] Filtered: {len(places)} → {len(result)} places (radius={max_radius_km}km)")
+
+    return result
+
+
+def optimize_route_order(places: list) -> list:
+    """
+    Greedy 알고리즘으로 동선 최적화 (가까운 순서로 정렬)
+
+    시작점: 첫 번째 장소
+    다음 장소: 현재 위치에서 가장 가까운 미방문 장소
+    """
+    if len(places) < 2:
+        return places
+
+    # 좌표가 있는 장소만 최적화 대상
+    coords = []
+    for i, place in enumerate(places):
+        try:
+            lat = float(place.get("mapy", 0))
+            lon = float(place.get("mapx", 0))
+            if lat != 0 and lon != 0:
+                coords.append((i, lat, lon))
+        except:
+            pass
+
+    if len(coords) < 2:
+        return places
+
+    # Greedy TSP
+    visited = set()
+    route = [coords[0][0]]  # 첫 번째 장소부터 시작
+    visited.add(coords[0][0])
+    current_lat, current_lon = coords[0][1], coords[0][2]
+
+    while len(visited) < len(coords):
+        nearest = None
+        nearest_dist = float('inf')
+
+        for idx, lat, lon in coords:
+            if idx not in visited:
+                dist = haversine_distance(current_lat, current_lon, lat, lon)
+                if dist < nearest_dist:
+                    nearest_dist = dist
+                    nearest = (idx, lat, lon)
+
+        if nearest:
+            route.append(nearest[0])
+            visited.add(nearest[0])
+            current_lat, current_lon = nearest[1], nearest[2]
+
+    # 좌표 없는 장소들 인덱스
+    no_coord_indices = [i for i in range(len(places)) if i not in visited]
+
+    # 최적화된 순서로 재배열
+    optimized = [places[i] for i in route] + [places[i] for i in no_coord_indices]
+
+    print(f"[ROUTE] Optimized route order: {[places[i].get('title', '')[:10] for i in route[:5]]}...")
+
+    return optimized
+
+
 # ========== MCP Server 설정 ==========
 MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://localhost:8000")
 
@@ -876,7 +987,15 @@ def curate_results_with_llm(query: str, tool_results: list[dict]) -> dict:
             "message": "요청하신 조건에 맞는 장소를 찾지 못했습니다."
         }
 
-    # 🔴 거리 계산하여 nearby 정보 추가 (동선 최적화용)
+    # 🔴 Step 1: 지리적 클러스터링 - 너무 멀리 떨어진 장소 필터링 (반경 10km)
+    results_summary = filter_by_geographic_cluster(results_summary, max_radius_km=10.0)
+    print(f"[CURATE] After geographic clustering: {len(results_summary)} places")
+
+    # 🔴 Step 2: 동선 최적화 - Greedy TSP로 가까운 순서 정렬
+    results_summary = optimize_route_order(results_summary)
+    print(f"[CURATE] Route optimized")
+
+    # 🔴 Step 3: 거리 계산하여 nearby 정보 추가 (LLM 참고용)
     results_summary = calculate_nearby_places(results_summary)
     print(f"[CURATE] Added nearby info to {len(results_summary)} places")
 
@@ -1025,11 +1144,56 @@ def curate_results_with_llm(query: str, tool_results: list[dict]) -> dict:
             "content_id": r["content_id"]
         })
 
+    # 🔴 코스 거리 검증 및 실제 거리 추가
+    if curated_course and "stops" in curated_course:
+        curated_course = _add_actual_distances_to_course(curated_course)
+
     return {
         "spots": spots,  # 리스트 뷰용 (전체)
         "course": curated_course,  # 코스 뷰용 (LLM 큐레이션)
         "message": f"{len(spots)}개의 장소를 찾았습니다."
     }
+
+
+def _add_actual_distances_to_course(course: dict) -> dict:
+    """
+    코스의 각 정차지 간 실제 거리를 계산하여 추가
+    LLM이 추정한 travel_time_to_next와 별개로 실제 거리 제공
+    """
+    stops = course.get("stops", [])
+    if len(stops) < 2:
+        return course
+
+    total_distance = 0.0
+
+    for i in range(len(stops)):
+        stop = stops[i]
+
+        if i < len(stops) - 1:
+            next_stop = stops[i + 1]
+            try:
+                lat1 = float(stop.get("mapy", 0))
+                lon1 = float(stop.get("mapx", 0))
+                lat2 = float(next_stop.get("mapy", 0))
+                lon2 = float(next_stop.get("mapx", 0))
+
+                if lat1 != 0 and lon1 != 0 and lat2 != 0 and lon2 != 0:
+                    dist = haversine_distance(lat1, lon1, lat2, lon2)
+                    stop["distance_to_next_km"] = round(dist, 1)
+                    total_distance += dist
+                    print(f"[DISTANCE] {stop.get('name', '')} → {next_stop.get('name', '')}: {dist:.1f}km")
+                else:
+                    stop["distance_to_next_km"] = None
+            except:
+                stop["distance_to_next_km"] = None
+        else:
+            # 마지막 정차지
+            stop["distance_to_next_km"] = None
+
+    course["total_distance_km"] = round(total_distance, 1)
+    print(f"[DISTANCE] Total course distance: {total_distance:.1f}km")
+
+    return course
 
 
 def _get_category_name(content_type_id: str, cat3: str = None) -> str:
