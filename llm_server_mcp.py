@@ -355,16 +355,37 @@ async def search_by_area_direct(area_code: str, sigungu_code: str, content_type_
 
 
 def analyze_query_needs(query: str) -> dict:
-    """쿼리에서 필요한 것들을 분석 (LLM 없이 규칙 기반)"""
+    """쿼리에서 필요한 것들을 분석 (LLM 없이 규칙 기반)
+
+    Returns:
+        dict: {
+            "food": ["맛집", "돈까스"],  # 일반 + 구체적 키워드
+            "food_specific": ["돈까스"],  # 구체적인 음식만 (직접 검색용)
+            "cafe": ["카페"],
+            ...
+        }
+    """
     query_lower = query.lower()
     needs = {}
 
-    # 음식 관련 키워드
-    food_keywords = ["맛집", "음식", "밥", "식당", "먹", "점심", "저녁", "아침", "돈까스", "삼겹살",
-                     "치킨", "피자", "한식", "중식", "일식", "양식", "분식", "고기", "해산물", "회"]
+    # 구체적인 음식 키워드 (API 키워드 검색에 직접 사용)
+    specific_food_keywords = [
+        "돈까스", "돈가스", "삼겹살", "치킨", "피자", "파스타", "스테이크",
+        "초밥", "회", "라멘", "우동", "냉면", "막국수", "칼국수", "짜장면", "짬뽕",
+        "떡볶이", "순대", "김밥", "비빔밥", "불고기", "갈비", "삼계탕", "설렁탕",
+        "순두부", "부대찌개", "감자탕", "곱창", "족발", "보쌈", "치즈", "버거", "햄버거",
+        "아이스크림", "빙수", "와플", "마카롱", "케이크"
+    ]
+    specific_matches = [kw for kw in specific_food_keywords if kw in query_lower]
+    if specific_matches:
+        needs["food_specific"] = specific_matches  # 직접 검색용
+
+    # 음식 관련 일반 키워드
+    food_keywords = ["맛집", "음식", "밥", "식당", "먹", "점심", "저녁", "아침",
+                     "한식", "중식", "일식", "양식", "분식", "고기", "해산물"]
     food_matches = [kw for kw in food_keywords if kw in query_lower]
-    if food_matches:
-        needs["food"] = food_matches
+    if food_matches or specific_matches:
+        needs["food"] = food_matches + specific_matches
 
     # 카페 관련 키워드
     cafe_keywords = ["카페", "커피", "디저트", "빵", "베이커리", "브런치", "차", "음료"]
@@ -405,6 +426,7 @@ async def orchestrated_search(query: str, area_code: str, sigungu_code: str, nee
     오케스트레이션된 검색 - 폴백 전략 포함
 
     전략:
+    0. 구체적인 음식 키워드가 있으면 최우선 검색 (돈까스, 피자 등)
     1. 키워드 검색 시도 (매칭된 키워드로)
     2. 결과 부족시 → 카테고리 기반 검색
     3. 여전히 부족시 → 지역 전체 검색
@@ -412,7 +434,26 @@ async def orchestrated_search(query: str, area_code: str, sigungu_code: str, nee
     all_results = {}
     search_log = []
 
+    # Strategy 0: 구체적인 음식 키워드 최우선 검색 (돈까스, 피자 등)
+    if "food_specific" in needs:
+        specific_results = {"items": []}
+        for kw in needs["food_specific"]:
+            print(f"[ORCH] Strategy 0: SPECIFIC food keyword search '{kw}'")
+            result = await search_by_keyword_direct(kw, area_code, sigungu_code, "39")  # 음식점
+            items = result.get("items", [])
+            search_log.append(f"specific:{kw}→{len(items)}개")
+            if items:
+                specific_results["items"].extend(items)
+
+        if specific_results["items"]:
+            all_results["food_specific"] = specific_results
+            print(f"[ORCH] Found {len(specific_results['items'])} specific food items!")
+
     for need_type, keywords in needs.items():
+        # food_specific은 이미 처리됨
+        if need_type == "food_specific":
+            continue
+
         content_type = NEED_TO_CONTENT_TYPE.get(need_type)
         results_for_need = {"items": []}
 
@@ -461,10 +502,23 @@ async def orchestrated_search(query: str, area_code: str, sigungu_code: str, nee
         all_results[need_type] = results_for_need
         print(f"[ORCH] {need_type}: {len(results_for_need.get('items', []))} items collected")
 
-    # 결과 합치기
+    # 결과 합치기 (food_specific 우선)
     combined_items = []
     seen_ids = set()
+
+    # 1. 구체적인 음식 검색 결과 먼저 추가 (돈까스 검색했으면 돈까스집 먼저)
+    if "food_specific" in all_results:
+        for item in all_results["food_specific"].get("items", []):
+            cid = item.get("contentid")
+            if cid and cid not in seen_ids:
+                seen_ids.add(cid)
+                combined_items.append(item)
+        print(f"[ORCH] Added {len(combined_items)} specific food items first")
+
+    # 2. 나머지 결과 추가
     for need_type, result in all_results.items():
+        if need_type == "food_specific":
+            continue  # 이미 처리됨
         for item in result.get("items", []):
             cid = item.get("contentid")
             if cid and cid not in seen_ids:
@@ -626,7 +680,7 @@ def select_tools_with_llm(query: str, area_code: Optional[str] = None, sigungu_c
 def curate_results_with_llm(query: str, tool_results: list[dict]) -> dict:
     """LLM을 사용해 검색 결과를 큐레이션 - spots(리스트뷰) + course(코스뷰) 분리"""
 
-    # 결과 요약 (좌표 정보 포함)
+    # 결과 요약 (좌표 정보 + cat3 포함)
     results_summary = []
     for result in tool_results:
         if "items" in result and result["items"]:
@@ -635,6 +689,7 @@ def curate_results_with_llm(query: str, tool_results: list[dict]) -> dict:
                     "title": item.get("title", ""),
                     "addr": item.get("addr1", ""),
                     "type": item.get("contenttypeid", ""),
+                    "cat3": item.get("cat3", ""),  # 세부 카테고리 (카페 구분용)
                     "image": item.get("firstimage", ""),
                     "mapx": item.get("mapx", ""),  # 경도
                     "mapy": item.get("mapy", ""),  # 위도
@@ -756,7 +811,7 @@ def curate_results_with_llm(query: str, tool_results: list[dict]) -> dict:
         spots.append({
             "name": r["title"],
             "address": r["addr"],
-            "category": _get_category_name(r["type"]),
+            "category": _get_category_name(r["type"], r.get("cat3")),  # cat3로 카페/음식점 구분
             "image_url": r["image"],
             "mapx": r["mapx"],
             "mapy": r["mapy"],
@@ -771,8 +826,22 @@ def curate_results_with_llm(query: str, tool_results: list[dict]) -> dict:
     }
 
 
-def _get_category_name(content_type_id: str) -> str:
-    """content_type_id를 카테고리명으로 변환"""
+def _get_category_name(content_type_id: str, cat3: str = None) -> str:
+    """content_type_id + cat3를 카테고리명으로 변환
+
+    cat3 코드 (음식점 세부 분류):
+    - A05020900: 카페/전통찻집
+    - A05020100: 한식
+    - A05020200: 서양식 (돈까스, 파스타 등)
+    - A05020300: 일식
+    - A05020400: 중식
+    - A05020700: 이색음식점
+    """
+    # 음식점(39)인 경우 cat3로 카페 구분
+    if content_type_id == "39" and cat3:
+        if cat3 == "A05020900":
+            return "카페"
+
     type_map = {
         "12": "관광지",
         "14": "문화시설",
