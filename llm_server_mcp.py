@@ -668,6 +668,41 @@ def analyze_query_needs(query: str) -> dict:
         needs["spot"] = ["관광"]
         needs["food"] = ["맛집"]
 
+    # 🔴 사용자가 요청한 순서대로 카테고리 추출 (검색 및 큐레이션에 활용)
+    # 예: "카페갔다가 돈까스먹고 저녁은 회" → ["카페", "돈까스", "횟집"]
+    user_order = []
+    order_keywords = [
+        # (카테고리명, [키워드들], cat3 코드 또는 None)
+        ("카페", ["카페", "커피", "디저트"], "A05020900"),
+        ("관광지", ["바다", "바닷가", "해변", "관광", "구경", "산책", "공원"], None),
+        ("치킨", ["치킨", "통닭", "후라이드"], "A05020700"),
+        ("횟집", ["횟집", "회", "해산물", "생선", "해물"], "A05020100"),  # 한식-해물
+        ("고깃집", ["고기", "고깃집", "삼겹살", "갈비", "소고기", "돼지"], "A05020100"),  # 한식
+        ("돈까스", ["돈까스", "돈가스", "까스"], "A05020200"),  # 서양식
+        ("일식", ["일식", "초밥", "라멘", "스시", "우동"], "A05020300"),
+        ("한식", ["한식", "한정식", "백반", "비빔밥", "김치"], "A05020100"),
+        ("중식", ["중식", "중국집", "짜장", "짬뽕", "탕수육"], "A05020400"),
+        ("양식", ["양식", "파스타", "스테이크", "피자"], "A05020200"),
+        ("분식", ["분식", "떡볶이", "순대", "김밥"], "A05020600"),
+    ]
+
+    # 쿼리에서 각 카테고리의 첫 등장 위치 찾기
+    category_positions = []
+    for cat_name, keywords, cat3 in order_keywords:
+        for kw in keywords:
+            pos = query_lower.find(kw)
+            if pos >= 0:
+                category_positions.append((pos, cat_name, cat3))
+                break
+
+    # 등장 순서대로 정렬
+    category_positions.sort(key=lambda x: x[0])
+    user_order = [(cat, cat3) for _, cat, cat3 in category_positions]
+
+    if user_order:
+        needs["user_order"] = user_order  # [(카테고리명, cat3코드), ...]
+        print(f"[ORCH] User requested order: {[cat for cat, _ in user_order]}")
+
     print(f"[ORCH] Analyzed needs: {needs}")
     return needs
 
@@ -677,15 +712,73 @@ async def orchestrated_search(query: str, area_code: str, sigungu_code: str, nee
     오케스트레이션된 검색 - 폴백 전략 포함
 
     전략:
-    0. 구체적인 음식 키워드가 있으면 최우선 검색 (돈까스, 피자 등)
-    1. 키워드 검색 시도 (매칭된 키워드로)
-    2. 결과 부족시 → 카테고리 기반 검색
-    3. 여전히 부족시 → 지역 전체 검색
+    0. 🔴 사용자가 요청한 카테고리 순서대로 검색 (카페 → 돈까스 → 회)
+    1. 구체적인 음식 키워드가 있으면 검색 (돈까스, 피자 등)
+    2. 키워드 검색 시도 (매칭된 키워드로)
+    3. 결과 부족시 → 카테고리 기반 검색
+    4. 여전히 부족시 → 지역 전체 검색
     """
     all_results = {}
     search_log = []
 
-    # Strategy 0: 구체적인 음식 키워드 최우선 검색 (돈까스, 피자 등)
+    # 🔴 Strategy 0: 사용자가 요청한 카테고리 순서대로 검색!
+    # 예: "카페갔다가 돈까스먹고 저녁은 회" → 카페, 돈까스, 횟집 각각 검색
+    if "user_order" in needs and needs["user_order"]:
+        user_order = needs["user_order"]
+        print(f"[ORCH] Strategy 0: Searching for user-requested categories: {[cat for cat, _ in user_order]}")
+
+        for cat_name, cat3 in user_order:
+            cat_results = {"items": [], "category": cat_name, "cat3": cat3}
+
+            # 카테고리별 검색 키워드 매핑
+            search_keywords = {
+                "카페": ["카페", "커피", "베이커리"],
+                "관광지": ["관광", "명소"],
+                "치킨": ["치킨", "통닭"],
+                "횟집": ["횟집", "회", "해물"],
+                "고깃집": ["고기", "삼겹살", "갈비"],
+                "돈까스": ["돈까스", "돈가스", "카츠"],
+                "일식": ["초밥", "일식", "라멘"],
+                "한식": ["한식", "한정식"],
+                "중식": ["중국집", "짬뽕", "짜장"],
+                "양식": ["파스타", "스테이크", "양식"],
+                "분식": ["분식", "떡볶이"],
+            }
+
+            keywords = search_keywords.get(cat_name, [cat_name])
+            content_type = "12" if cat_name == "관광지" else "39"  # 관광지면 12, 아니면 음식점
+
+            for kw in keywords[:2]:
+                print(f"[ORCH] Strategy 0: Searching '{kw}' for category '{cat_name}'")
+                result = await search_by_keyword_direct(kw, area_code, sigungu_code, content_type)
+                items = result.get("items", [])
+                search_log.append(f"user_order:{cat_name}→{kw}→{len(items)}개")
+
+                if items:
+                    # cat3 필터링 (카페, 돈까스 등 세부 분류)
+                    if cat3:
+                        filtered_items = [i for i in items if i.get("cat3", "").startswith(cat3[:7])]  # A050209xx 식으로 prefix 매칭
+                        if filtered_items:
+                            items = filtered_items
+                            print(f"[ORCH] Filtered by cat3 {cat3}: {len(items)} items")
+
+                    # 중복 제거하며 추가
+                    existing_ids = {i.get("contentid") for i in cat_results["items"]}
+                    for item in items:
+                        if item.get("contentid") not in existing_ids:
+                            # 🔴 검색된 아이템에 원래 요청 카테고리 태깅
+                            item["_user_category"] = cat_name
+                            cat_results["items"].append(item)
+                            existing_ids.add(item.get("contentid"))
+
+                    if len(cat_results["items"]) >= 5:
+                        break
+
+            if cat_results["items"]:
+                all_results[f"user_{cat_name}"] = cat_results
+                print(f"[ORCH] Found {len(cat_results['items'])} items for user category '{cat_name}'")
+
+    # Strategy 1: 구체적인 음식 키워드 최우선 검색 (돈까스, 피자 등)
     if "food_specific" in needs:
         specific_results = {"items": []}
 
@@ -779,22 +872,34 @@ async def orchestrated_search(query: str, area_code: str, sigungu_code: str, nee
         all_results[need_type] = results_for_need
         print(f"[ORCH] {need_type}: {len(results_for_need.get('items', []))} items collected")
 
-    # 결과 합치기 (food_specific 우선)
+    # 결과 합치기 (사용자 요청 카테고리 우선!)
     combined_items = []
     seen_ids = set()
 
-    # 1. 구체적인 음식 검색 결과 먼저 추가 (돈까스 검색했으면 돈까스집 먼저)
+    # 🔴 1. 사용자가 요청한 카테고리 결과 먼저 추가 (순서대로!)
+    user_order = needs.get("user_order", [])
+    for cat_name, _ in user_order:
+        key = f"user_{cat_name}"
+        if key in all_results:
+            for item in all_results[key].get("items", []):
+                cid = item.get("contentid")
+                if cid and cid not in seen_ids:
+                    seen_ids.add(cid)
+                    combined_items.append(item)
+            print(f"[ORCH] Added {len([i for i in combined_items if i.get('_user_category') == cat_name])} items for user category '{cat_name}'")
+
+    # 2. 구체적인 음식 검색 결과 추가 (돈까스 검색했으면 돈까스집)
     if "food_specific" in all_results:
         for item in all_results["food_specific"].get("items", []):
             cid = item.get("contentid")
             if cid and cid not in seen_ids:
                 seen_ids.add(cid)
                 combined_items.append(item)
-        print(f"[ORCH] Added {len(combined_items)} specific food items first")
+        print(f"[ORCH] Added specific food items, total now: {len(combined_items)}")
 
-    # 2. 나머지 결과 추가
+    # 3. 나머지 결과 추가
     for need_type, result in all_results.items():
-        if need_type == "food_specific":
+        if need_type == "food_specific" or need_type.startswith("user_"):
             continue  # 이미 처리됨
         for item in result.get("items", []):
             cid = item.get("contentid")
@@ -802,11 +907,13 @@ async def orchestrated_search(query: str, area_code: str, sigungu_code: str, nee
                 seen_ids.add(cid)
                 combined_items.append(item)
 
+    # 🔴 user_order 정보도 반환 (curate에서 활용)
     return {
         "items": combined_items,
         "totalCount": len(combined_items),
         "search_log": search_log,
-        "needs_analyzed": list(needs.keys())
+        "needs_analyzed": list(needs.keys()),
+        "user_order": user_order
     }
 
 
@@ -954,11 +1061,17 @@ def select_tools_with_llm(query: str, area_code: Optional[str] = None, sigungu_c
     return []
 
 
-def curate_results_with_llm(query: str, tool_results: list[dict]) -> dict:
-    """LLM을 사용해 검색 결과를 큐레이션 - spots(리스트뷰) + course(코스뷰) 분리"""
+def curate_results_with_llm(query: str, tool_results: list[dict], user_order: list = None) -> dict:
+    """LLM을 사용해 검색 결과를 큐레이션 - spots(리스트뷰) + course(코스뷰) 분리
+
+    Args:
+        user_order: 사용자가 요청한 카테고리 순서 [(카테고리명, cat3코드), ...]
+    """
+    user_order = user_order or []
 
     # 🔴 카테고리별로 분류해서 균형있게 선택
-    # 카페(cat3=A05020900)는 음식점과 별도로 분리!
+    # 1. 사용자 요청 카테고리 (_user_category 태그 활용)
+    # 2. 기본 카테고리 (관광지, 음식점, 카페 등)
     items_by_category = {
         "12": [],      # 관광지
         "14": [],      # 문화시설
@@ -967,11 +1080,22 @@ def curate_results_with_llm(query: str, tool_results: list[dict]) -> dict:
         "cafe": [],    # 카페 (별도 분리)
     }
 
+    # 🔴 사용자 요청 카테고리별 분류 추가
+    items_by_user_category = {}
+    for cat_name, _ in user_order:
+        items_by_user_category[cat_name] = []
+
     for result in tool_results:
         if "items" in result and result["items"]:
             for item in result["items"]:
                 content_type = item.get("contenttypeid", "39")
                 cat3 = item.get("cat3", "")
+
+                # 🔴 사용자 요청 카테고리가 있으면 우선 분류
+                user_cat = item.get("_user_category")
+                if user_cat and user_cat in items_by_user_category:
+                    items_by_user_category[user_cat].append(item)
+                    continue  # 사용자 카테고리로 분류되면 기본 분류 스킵
 
                 # 🔴 카페(A05020900)는 별도 카테고리로 분리
                 if content_type == "39" and cat3 == "A05020900":
@@ -981,16 +1105,46 @@ def curate_results_with_llm(query: str, tool_results: list[dict]) -> dict:
                 else:
                     items_by_category["39"].append(item)  # 기본값: 음식점
 
-    # 카테고리별 통계 출력
+    # 사용자 요청 카테고리 통계 출력
+    for cat_name, items in items_by_user_category.items():
+        if items:
+            print(f"[CURATE] User category '{cat_name}': {len(items)} items")
+
+    # 기본 카테고리별 통계 출력
     for cat, items in items_by_category.items():
         if items:
             cat_name = {"12": "관광지", "14": "문화시설", "32": "숙박", "39": "음식점", "cafe": "카페"}.get(cat, cat)
             print(f"[CURATE] Category {cat_name}: {len(items)} items")
 
-    # 🔴 카테고리별로 균형있게 선택 (각 카테고리에서 최대 8개씩)
+    # 🔴 사용자 요청 카테고리 우선 선택!
     MAX_PER_CATEGORY = 8
     results_summary = []
 
+    # 1. 사용자가 요청한 카테고리에서 먼저 선택 (각 카테고리에서 최소 3개)
+    for cat_name, _ in user_order:
+        items = items_by_user_category.get(cat_name, [])
+        for item in items[:max(3, MAX_PER_CATEGORY)]:  # 최소 3개, 최대 8개
+            cat3 = item.get("cat3", "")
+            content_type = item.get("contenttypeid", "39")
+            # 한글 카테고리명으로 변환 - 사용자 요청 카테고리명 우선 사용
+            category_name = cat_name  # 사용자 요청 카테고리명 그대로 사용
+
+            results_summary.append({
+                "title": item.get("title", ""),
+                "addr": item.get("addr1", ""),
+                "type": content_type,
+                "cat3": cat3,
+                "category": category_name,  # 사용자 요청 카테고리명!
+                "image": item.get("firstimage", ""),
+                "mapx": item.get("mapx", ""),
+                "mapy": item.get("mapy", ""),
+                "tel": item.get("tel", ""),
+                "content_id": item.get("contentid", ""),
+                "_user_category": cat_name
+            })
+        print(f"[CURATE] Selected {min(len(items), max(3, MAX_PER_CATEGORY))} items for user category '{cat_name}'")
+
+    # 2. 나머지 카테고리에서 추가 선택
     for content_type, items in items_by_category.items():
         for item in items[:MAX_PER_CATEGORY]:
             cat3 = item.get("cat3", "")
@@ -1414,8 +1568,9 @@ async def mcp_query(request: MCPQueryRequest):
             search_result["totalCount"] = len(search_result["items"])
             search_result["search_log"].append(f"broad_fallback→{len(broad_result['items'])}개")
 
-    # Phase 4: LLM 큐레이션 (코스 생성)
-    curated = curate_results_with_llm(query, [search_result])
+    # Phase 4: LLM 큐레이션 (코스 생성) - user_order 전달
+    user_order = search_result.get("user_order", [])
+    curated = curate_results_with_llm(query, [search_result], user_order=user_order)
 
     return {
         "success": True,
