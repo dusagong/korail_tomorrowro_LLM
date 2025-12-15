@@ -219,6 +219,93 @@ NEED_TO_CONTENT_TYPE = {
 # 최소 결과 개수 기준
 MIN_RESULTS_THRESHOLD = 3
 
+# 🔴 LLM 키워드 정규화 캐시 (동일 키워드 반복 요청 방지)
+KEYWORD_CACHE = {}
+
+
+def normalize_keywords_batch(user_keywords: list[str]) -> dict[str, list[str]]:
+    """
+    LLM을 사용해 여러 사용자 키워드를 한번에 API 검색 키워드로 변환 (배치 처리)
+
+    Input: ["고깃집", "횟집", "일식"]
+    Output: {
+        "고깃집": ["고기", "삼겹살", "갈비"],
+        "횟집": ["횟집", "회", "해물"],
+        "일식": ["초밥", "라멘", "스시"]
+    }
+    """
+    result = {}
+    uncached_keywords = []
+
+    # 캐시된 것 먼저 처리
+    for kw in user_keywords:
+        if kw in KEYWORD_CACHE:
+            result[kw] = KEYWORD_CACHE[kw]
+            print(f"[NORMALIZE] Cache hit: '{kw}' → {KEYWORD_CACHE[kw]}")
+        else:
+            uncached_keywords.append(kw)
+
+    # 캐시에 없는 것만 LLM 호출 (배치)
+    if not uncached_keywords:
+        return result
+
+    keywords_str = ", ".join(uncached_keywords)
+    prompt = f"""한국관광공사 API에서 음식점을 검색하려고 합니다.
+사용자가 다음 음식점들을 찾고 있습니다: {keywords_str}
+
+API는 음식점 이름에 포함된 키워드로 검색합니다.
+각 키워드별로 음식점 이름에 자주 포함되는 검색어 3개씩 추천해주세요.
+
+예시:
+- 고깃집 → ["고기", "삼겹살", "갈비"]
+- 횟집 → ["횟집", "회", "해물"]
+- 일식집 → ["초밥", "라멘", "스시"]
+- 중국집 → ["짬뽕", "중화", "반점"]
+- 치킨집 → ["치킨", "통닭", "후라이드"]
+- 카페 → ["카페", "커피", "베이커리"]
+
+응답 형식 (JSON만, 설명 없이):
+{{
+  "키워드1": ["검색어1", "검색어2", "검색어3"],
+  "키워드2": ["검색어1", "검색어2", "검색어3"]
+}}"""
+
+    messages = [{"role": "user", "content": prompt}]
+
+    try:
+        response = generate_response(messages, max_tokens=300, temperature=0.1)
+        print(f"[NORMALIZE] LLM batch response: {response}")
+
+        # JSON 파싱
+        json_start = response.find("{")
+        json_end = response.rfind("}") + 1
+        if json_start >= 0 and json_end > json_start:
+            parsed = json.loads(response[json_start:json_end])
+            if isinstance(parsed, dict):
+                for kw in uncached_keywords:
+                    if kw in parsed and isinstance(parsed[kw], list):
+                        result[kw] = parsed[kw]
+                        KEYWORD_CACHE[kw] = parsed[kw]  # 캐시 저장
+                        print(f"[NORMALIZE] '{kw}' → {parsed[kw]}")
+                    else:
+                        # LLM이 해당 키워드를 반환하지 않은 경우
+                        result[kw] = [kw]
+                        print(f"[NORMALIZE] '{kw}' → fallback to original")
+                return result
+    except Exception as e:
+        print(f"[NORMALIZE] Batch error: {e}")
+
+    # 실패시 원본 키워드 반환
+    for kw in uncached_keywords:
+        result[kw] = [kw]
+    return result
+
+
+def normalize_keyword_with_llm(user_keyword: str) -> list[str]:
+    """단일 키워드 정규화 (배치 함수의 wrapper)"""
+    result = normalize_keywords_batch([user_keyword])
+    return result.get(user_keyword, [user_keyword])
+
 
 # ========== Request/Response 모델 ==========
 class ChatMessage(BaseModel):
@@ -426,8 +513,9 @@ def analyze_query_needs(query: str) -> dict:
         "떡볶이", "순대", "김밥", "비빔밥", "불고기", "갈비", "삼계탕", "설렁탕",
         "순두부", "부대찌개", "감자탕", "곱창", "족발", "보쌈", "치즈", "버거", "햄버거",
         "아이스크림", "빙수", "와플", "마카롱", "케이크",
-        # 음식 카테고리 (사용자가 "일식 먹고싶어" 등 요청시)
-        "일식", "중식", "한식", "양식", "고기", "횟집", "해산물", "분식"
+        # 음식 카테고리 (KEYWORD_TO_API_KEYWORDS 매핑 활용)
+        "일식", "일식집", "중식", "중식집", "한식", "양식",
+        "고기", "고깃집", "고기집", "횟집", "해산물", "분식", "디저트"
     ]
     specific_matches = [kw for kw in specific_food_keywords if kw in query_lower]
     if specific_matches:
@@ -489,23 +577,32 @@ async def orchestrated_search(query: str, area_code: str, sigungu_code: str, nee
     # Strategy 0: 구체적인 음식 키워드 최우선 검색 (돈까스, 피자 등)
     if "food_specific" in needs:
         specific_results = {"items": []}
-        for kw in needs["food_specific"]:
-            print(f"[ORCH] Strategy 0: SPECIFIC food keyword search '{kw}'")
-            result = await search_by_keyword_direct(kw, area_code, sigungu_code, "39")  # 음식점
-            items = result.get("items", [])
 
-            # 🔴 제목에 키워드가 포함된 것만 필터링 (치킨 검색 → 치킨집만)
-            filtered_items = [
-                item for item in items
-                if kw.lower() in item.get("title", "").lower()
-            ]
-            search_log.append(f"specific:{kw}→{len(items)}개(필터:{len(filtered_items)}개)")
+        # 🔴 LLM 배치 정규화: 모든 키워드를 한번에 처리!
+        # ["고깃집", "횟집", "일식"] → {"고깃집": ["고기",...], "횟집": ["회",...], ...}
+        keyword_mapping = normalize_keywords_batch(needs["food_specific"])
+        print(f"[ORCH] Strategy 0: Batch normalized {len(keyword_mapping)} keywords")
 
-            if filtered_items:
-                specific_results["items"].extend(filtered_items)
-            elif items:
-                # 필터링 결과가 없으면 원본 중 일부만 (최대 3개)
-                specific_results["items"].extend(items[:3])
+        for kw, api_keywords in keyword_mapping.items():
+            print(f"[ORCH] Strategy 0: '{kw}' → API keywords: {api_keywords}")
+
+            for api_kw in api_keywords[:3]:  # 최대 3개 API 키워드 시도
+                print(f"[ORCH] Strategy 0: Searching '{api_kw}' for user keyword '{kw}'")
+                result = await search_by_keyword_direct(api_kw, area_code, sigungu_code, "39")  # 음식점
+                items = result.get("items", [])
+                search_log.append(f"specific:{kw}→{api_kw}→{len(items)}개")
+
+                if items:
+                    # 중복 제거하며 추가
+                    existing_ids = {i.get("contentid") for i in specific_results["items"]}
+                    for item in items:
+                        if item.get("contentid") not in existing_ids:
+                            specific_results["items"].append(item)
+                            existing_ids.add(item.get("contentid"))
+
+                    # 해당 키워드에서 충분한 결과가 모이면 다음 키워드로
+                    if len([i for i in specific_results["items"]]) >= 5:
+                        break
 
         if specific_results["items"]:
             all_results["food_specific"] = specific_results
@@ -812,6 +909,7 @@ def curate_results_with_llm(query: str, tool_results: list[dict]) -> dict:
         "category": "카페/음식점/관광지/숙박",
         "time": "오전 10시",
         "duration": "1시간",
+        "travel_time_to_next": "다음 장소까지 약 10분",
         "reason": "커플에게 추천하는 이유",
         "tip": "방문 팁"
       }}
@@ -820,6 +918,15 @@ def curate_results_with_llm(query: str, tool_results: list[dict]) -> dict:
     "summary": "코스 요약 (2-3문장, 커플 여행 관점)"
   }}
 }}
+
+## 이동시간 계산 규칙 (travel_time_to_next):
+- nearby 필드의 거리 정보를 활용하세요
+- 거리 기준 예상 이동시간: **1km당 약 3분** (차량 기준)
+  - 1km → 약 3분
+  - 2km → 약 6분
+  - 5km → 약 15분
+  - 10km → 약 30분
+- 마지막 정차지는 travel_time_to_next 생략 (null)
 
 ## 규칙:
 - **사용자가 요청한 순서대로** 코스를 구성하세요!
