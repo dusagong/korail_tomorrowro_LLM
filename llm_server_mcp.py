@@ -441,9 +441,19 @@ async def orchestrated_search(query: str, area_code: str, sigungu_code: str, nee
             print(f"[ORCH] Strategy 0: SPECIFIC food keyword search '{kw}'")
             result = await search_by_keyword_direct(kw, area_code, sigungu_code, "39")  # 음식점
             items = result.get("items", [])
-            search_log.append(f"specific:{kw}→{len(items)}개")
-            if items:
-                specific_results["items"].extend(items)
+
+            # 🔴 제목에 키워드가 포함된 것만 필터링 (치킨 검색 → 치킨집만)
+            filtered_items = [
+                item for item in items
+                if kw.lower() in item.get("title", "").lower()
+            ]
+            search_log.append(f"specific:{kw}→{len(items)}개(필터:{len(filtered_items)}개)")
+
+            if filtered_items:
+                specific_results["items"].extend(filtered_items)
+            elif items:
+                # 필터링 결과가 없으면 원본 중 일부만 (최대 3개)
+                specific_results["items"].extend(items[:3])
 
         if specific_results["items"]:
             all_results["food_specific"] = specific_results
@@ -452,6 +462,12 @@ async def orchestrated_search(query: str, area_code: str, sigungu_code: str, nee
     for need_type, keywords in needs.items():
         # food_specific은 이미 처리됨
         if need_type == "food_specific":
+            continue
+
+        # 🔴 food_specific이 있으면 food need는 건너뛰기 (중복 검색 방지)
+        # 치킨 검색했으면 일반 음식점 검색 안함 → 고깃집/횟집 섞임 방지
+        if need_type == "food" and "food_specific" in needs:
+            print(f"[ORCH] Skipping 'food' need (food_specific already processed)")
             continue
 
         content_type = NEED_TO_CONTENT_TYPE.get(need_type)
@@ -486,12 +502,13 @@ async def orchestrated_search(query: str, area_code: str, sigungu_code: str, nee
                     if item.get("contentid") not in existing_ids:
                         results_for_need["items"].append(item)
 
-        # Strategy 3: 지역 전체 검색 (여전히 부족시)
-        if len(results_for_need.get("items", [])) < MIN_RESULTS_THRESHOLD:
-            print(f"[ORCH] Strategy 3: area search without content_type")
-            result = await search_by_area_direct(area_code, sigungu_code, None, num_rows=30)
+        # Strategy 3: 더 많은 결과 요청 (같은 카테고리 유지!)
+        # 🔴 content_type 없이 검색하면 고깃집/횟집 등 관련 없는 결과가 섞임 → 제거
+        if len(results_for_need.get("items", [])) < MIN_RESULTS_THRESHOLD and content_type:
+            print(f"[ORCH] Strategy 3: expanded area search with content_type={content_type}")
+            result = await search_by_area_direct(area_code, sigungu_code, content_type, num_rows=30)
             items = result.get("items", [])
-            search_log.append(f"area_only→{len(items)}개")
+            search_log.append(f"area_expanded:{content_type}→{len(items)}개")
 
             if items:
                 existing_ids = {i.get("contentid") for i in results_for_need.get("items", [])}
