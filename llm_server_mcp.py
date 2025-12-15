@@ -247,7 +247,8 @@ async def call_mcp_tool_direct(tool_name: str, arguments: dict) -> dict:
             "MobileOS": "ETC",
             "MobileApp": "TravelMCP",
             "_type": "json",
-            "numOfRows": arguments.get("num_of_rows", 20)
+            "numOfRows": arguments.get("num_of_rows", 20),
+            "arrange": arguments.get("arrange", "B")  # 기본값: 조회순(인기순)
         }
 
         endpoint_map = {
@@ -331,11 +332,19 @@ async def search_by_keyword_direct(keyword: str, area_code: str, sigungu_code: s
     return await call_mcp_tool_direct("search_by_keyword", args)
 
 
-async def search_by_area_direct(area_code: str, sigungu_code: str, content_type_id: str = None, num_rows: int = 20) -> dict:
-    """지역 기반 검색 직접 호출"""
+async def search_by_area_direct(area_code: str, sigungu_code: str, content_type_id: str = None, num_rows: int = 20, arrange: str = "B") -> dict:
+    """지역 기반 검색 직접 호출
+
+    arrange 옵션:
+    - A: 제목순 (기본)
+    - B: 조회순 (인기순) ⭐ 추천
+    - C: 수정일순
+    - D: 생성일순
+    """
     args = {
         "area_code": area_code,
-        "num_of_rows": num_rows
+        "num_of_rows": num_rows,
+        "arrange": arrange  # 인기순 정렬
     }
     if sigungu_code:
         args["sigungu_code"] = sigungu_code
