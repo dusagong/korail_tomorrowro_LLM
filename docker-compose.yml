@@ -35,6 +35,26 @@ services:
     profiles:
       - mcp  # docker compose --profile mcp up 으로 실행
 
+  # MCP Server - 한국관광공사 API (경량)
+  mcp-server:
+    image: python:3.12-slim
+    container_name: korail-mcp-server
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./mcp_server:/app
+    working_dir: /app
+    environment:
+      - TOUR_API_KEY=${TOUR_API_KEY}
+      - PORT=8000
+    command: >
+      bash -c "pip install --no-cache-dir -r requirements.txt &&
+      python server.py"
+    networks:
+      - korail-network
+      - shared-ai-network
+    restart: unless-stopped
+
   # Qdrant - Vector Database for RAG (korail 전용)
   qdrant:
     image: qdrant/qdrant:latest

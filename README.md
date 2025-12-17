@@ -43,30 +43,17 @@ HF_TOKEN=your_huggingface_token
 TOUR_API_KEY=your_tour_api_key
 ```
 
-### 2. 실행 방법
-
-#### 방법 A: Docker Compose (권장)
+### 2. 실행
 
 ```bash
-# 전체 서비스 실행
+# 서비스 실행 (mcp-server + qdrant)
 docker compose up -d
 
-# MCP 프로필 포함 실행
+# LLM 서버도 함께 실행 (GPU 필요)
 docker compose --profile mcp up -d
 
 # 로그 확인
-docker compose logs -f llm-mcp
-```
-
-#### 방법 B: 직접 실행
-
-```bash
-# LLM + MCP 서버 실행
-python llm_server_mcp.py
-
-# 또는 MCP 서버만 실행 (경량)
-cd mcp_server
-python server.py
+docker compose logs -f mcp-server
 ```
 
 ## API 사용법
@@ -114,17 +101,7 @@ curl http://localhost:30001/v1/chat/completions \
 curl http://localhost:30001/v1/mcp/tools
 ```
 
-## MCP Server (독립 실행)
-
-LLM 없이 관광 API만 사용하려면:
-
-```bash
-cd mcp_server
-pip install -r requirements.txt
-python server.py
-```
-
-자세한 내용: [mcp_server/README.md](mcp_server/README.md)
+자세한 MCP Server 사용법: [mcp_server/README.md](mcp_server/README.md)
 
 ## 사용 가능한 도구
 
