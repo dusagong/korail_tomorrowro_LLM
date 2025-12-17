@@ -1,8 +1,9 @@
 services:
-  # EXAONE-3.5-32B Server + MCP Host (Transformers 기반, 한국어 특화)
-  llm:
+  # EXAONE-3.5-32B + MCP Host (korail 전용)
+  # 공유 LLM 서버를 사용하거나, MCP 기능이 필요하면 이 서버 사용
+  llm-mcp:
     image: lmsysorg/sglang:latest
-    container_name: exaone-32b-mcp
+    container_name: korail-llm-mcp
     runtime: nvidia
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -12,7 +13,7 @@ services:
       - TOUR_API_KEY=${TOUR_API_KEY}
       - MCP_SERVER_URL=http://host.docker.internal:8000
     ports:
-      - "30000:30000"
+      - "30001:30000"  # 30001로 변경 (공유 LLM은 30000)
     volumes:
       - ~/.cache/huggingface:/root/.cache/huggingface
       - ./llm_server_mcp.py:/app/server.py
@@ -27,12 +28,17 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+    networks:
+      - korail-network
+      - shared-ai-network
     restart: unless-stopped
+    profiles:
+      - mcp  # docker compose --profile mcp up 으로 실행
 
-  # Qdrant - Vector Database for RAG
+  # Qdrant - Vector Database for RAG (korail 전용)
   qdrant:
     image: qdrant/qdrant:latest
-    container_name: qdrant
+    container_name: korail-qdrant
     ports:
       - "6333:6333"
       - "6334:6334"
@@ -40,33 +46,17 @@ services:
       - qdrant_data:/qdrant/storage
     environment:
       - QDRANT__SERVICE__GRPC_PORT=6334
+    networks:
+      - korail-network
+      - shared-ai-network
     restart: unless-stopped
 
-  # BGE-M3 Embedding Server (다국어/한국어 지원) - ARM64 + GPU
-  embedding:
-    image: lmsysorg/sglang:latest
-    container_name: embedding-bge-m3
-    runtime: nvidia
-    environment:
-      - NVIDIA_VISIBLE_DEVICES=all
-      - HF_TOKEN=${HF_TOKEN}
-    ports:
-      - "8080:8080"
-    volumes:
-      - ~/.cache/huggingface:/root/.cache/huggingface
-      - ./embedding_server.py:/app/server.py
-    working_dir: /app
-    command: >
-      bash -c "pip install --no-cache-dir sentence-transformers fastapi uvicorn &&
-      python server.py"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-    restart: unless-stopped
+networks:
+  korail-network:
+    name: korail-network
+    driver: bridge
+  shared-ai-network:
+    external: true  # shared-ai-services에서 생성한 네트워크 사용
 
 volumes:
   qdrant_data:
